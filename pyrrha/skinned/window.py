@@ -1,0 +1,656 @@
+# -*- coding: utf-8 -*-
+# Pyrrha - a Qt port of Pithos.
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 3.
+
+"""The classic Winamp skinned main window (prototype).
+
+Renders a fixed 275x116 frameless window entirely from a :class:`Skin`'s
+sprites and drives a controller (a ``PyrrhaWindow``). Coordinates follow the
+classic Winamp 2 skin spec; a few (title/time placement) are easy to tune
+against a real skin.
+"""
+
+import logging
+
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
+
+from .eqwindow import SkinnedEqWindow
+from .font import CHAR_H, CHAR_W, NUM_H, NUM_W, NumberFont, TextFont
+from .playlistwindow import SkinnedPlaylistWindow
+
+W, H = 275, 116  # classic main-window native size
+WMAX = 1600      # max logical content width the shell can grow to
+
+# The main window stretches by keeping a fixed left slice and a fixed
+# right-anchored slice, filling the inserted gap with the skin's own pixels.
+SPLIT = 219      # width of the left slice kept as-is (right slice = W-SPLIT)
+TB_CORNER = 25   # title-bar end-cap width (carries the menu/close/min glyphs)
+TB_TITLE = 100   # centered title graphic width, re-centered as the bar widens
+
+# name, dest x/y/w/h, source x, source y (normal), source y (pressed)
+BUTTONS = [
+    ('prev', 16, 88, 23, 18, 0, 0, 18),
+    ('play', 39, 88, 23, 18, 23, 0, 18),
+    ('pause', 62, 88, 23, 18, 46, 0, 18),
+    ('stop', 85, 88, 23, 18, 69, 0, 18),
+    ('next', 108, 88, 22, 18, 92, 0, 18),
+    ('eject', 136, 89, 22, 16, 114, 0, 16),
+]
+
+TITLEBAR = (0, 0, 275, 14)          # dest; src active (27,0), inactive (27,15)
+MENU = QRect(6, 3, 9, 9)            # top-left main-menu (options) button
+CLOSE = QRect(264, 3, 9, 9)
+# The main title bar's minimize + windowshade buttons; either minimizes the app.
+MINIMIZE = [QRect(244, 3, 9, 9), QRect(254, 3, 9, 9)]
+# EQ / playlist toggle buttons (from shufrep.bmp): open or close those panels.
+EQ_TOGGLE = QRect(219, 58, 23, 12)
+PL_TOGGLE = QRect(242, 58, 23, 12)
+VOLUME = QRect(107, 57, 68, 13)     # slider background area
+VOL_HANDLE_W = 14
+TITLE_AREA = QRect(111, 24, 154, CHAR_H)   # song-title marquee
+TIME_POS = [(48, 26), (60, 26), (78, 26), (90, 26)]  # MM:SS digit slots
+MINUS_POS = (36, 26)                # leading "-" shown in remaining-time mode
+TIME_RECT = QRect(36, 24, 66, 16)   # click to toggle elapsed <-> remaining
+STATUS_POS = (26, 28)               # play/pause/stop indicator
+VIS = QRect(24, 48, 76, 15)         # spectrum-analyzer visualization area
+POSBAR = QRect(16, 72, 248, 10)     # song-progress bar (non-interactive)
+POSBAR_THUMB_W = 29                 # posbar.bmp: bg (0,0,248,10), thumb (248,0,29,10)
+KBPS_POS = (111, 43)                 # bitrate number (small font, before "kbps")
+KHZ_POS = (156, 43)                  # sample-rate number (before "kHz")
+STEREO_POS = (239, 41)              # from monoster.bmp: (0,0) lit / (0,12) dim
+MONO_POS = (212, 41)               # from monoster.bmp: (29,0) lit / (29,12) dim
+VIS_BARS = 19                       # analyzer bars (76px / 4px pitch)
+BAR_FALL = 0.09                     # per-frame bar falloff (rise is instant)
+PEAK_GRAVITY = 0.007                # peak-cap fall acceleration (per frame^2)
+
+
+class SkinnedWindow(QWidget):
+    def __init__(self, controller, skin, parent=None):
+        super().__init__(parent, Qt.FramelessWindowHint if parent is None else Qt.Widget)
+        self.ctl = controller
+        self.skin = skin
+        self.text_font = TextFont(skin)
+        self.num_font = NumberFont(skin)
+        self.setFixedSize(W, H)
+        self.setWindowTitle('Pyrrha')
+
+        self._pressed = None      # currently-held transport button
+        self._vol_dragging = False
+        self._win_drag = None     # window-move offset
+        self._scroll = 0          # marquee scroll offset
+        self._time_remaining = False   # False = elapsed, True = remaining (-MM:SS)
+        self._volume = float(controller.settings['volume'])
+        self._vis_colors = self._load_vis_colors()
+        self._vis_active = False
+        self._vis_mode = 0                  # 0 bars, 1 lines, 2 dots, 3 off (click to cycle)
+        self._bar = [0.0] * VIS_BARS        # current bar heights (0..1)
+        self._peak = [0.0] * VIS_BARS       # falling peak-cap positions
+        self._peak_vel = [0.0] * VIS_BARS   # peak-cap velocities
+        self._vis_edges_cache = None        # cached log-frequency bin edges
+
+        # Live updates from the controller.
+        controller.song_changed.connect(lambda *_: self._reset_marquee())
+        controller.play_state_changed.connect(lambda *_: self.update())
+        controller.buffering_finished.connect(lambda *_: self.update())
+
+        # Marquee scroll + time tick.
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(220)
+
+        # Faster tick for the spectrum-analyzer visualization.
+        self._vis_timer = QTimer(self)
+        self._vis_timer.timeout.connect(self._vis_tick)
+        self._vis_timer.start(50)
+
+    def _load_vis_colors(self):
+        """Per-row analyzer colors (bottom → top) from the skin's VISCOLOR.TXT
+        (entries 2..17), resampled to the visualization height; a green → red
+        gradient is used when the skin has no palette. Also sets the peak-cap
+        color (entry 23, the Winamp peak color)."""
+        pal = []
+        for line in self.skin.text('viscolor.txt').splitlines():
+            parts = [x.strip() for x in line.split('//')[0].split(',')]
+            if len(parts) >= 3 and parts[0]:
+                try:
+                    pal.append(QColor(int(parts[0]), int(parts[1]), int(parts[2])))
+                except ValueError:
+                    pass
+        if len(pal) >= 18:
+            grad = pal[2:18]
+        else:
+            grad = [QColor(int(255 * r / 15), int(255 * (1 - r / 15)), 40)
+                    for r in range(16)]
+        self._peak_color = pal[23] if len(pal) >= 24 else QColor(255, 255, 255)
+        # Skin accent (analyzer base color) — used for the position-bar fill.
+        self._accent = pal[2] if len(pal) >= 3 else QColor(31, 104, 236)
+        h = VIS.height()
+        return [grad[min(len(grad) - 1, r * len(grad) // h)] for r in range(h)]
+
+    def _vis_edges(self, count):
+        """Log-spaced FFT-bin edges grouping ``count`` spectrum bands into
+        VIS_BARS display bars (cached per band count)."""
+        if self._vis_edges_cache and self._vis_edges_cache[0] == count:
+            return self._vis_edges_cache[1]
+        edges = [min(count, max(1, int(round((count / 1.0) ** (i / VIS_BARS)))))
+                 for i in range(VIS_BARS + 1)]
+        for i in range(1, len(edges)):        # keep strictly increasing
+            if edges[i] <= edges[i - 1]:
+                edges[i] = min(count, edges[i - 1] + 1)
+        self._vis_edges_cache = (count, edges)
+        return edges
+
+    def _advance_vis(self, raw):
+        """Step the bar/peak animation one frame toward ``raw`` (the spectrum,
+        or None to decay to silence). Returns True while anything is moving."""
+        edges = self._vis_edges(len(raw)) if raw else None
+        moving = False
+        for i in range(VIS_BARS):
+            if edges is not None:
+                target = max(raw[edges[i]:edges[i + 1]] or raw[edges[i]:edges[i] + 1])
+            else:
+                target = 0.0
+            # Bars rise instantly, fall gradually.
+            if target >= self._bar[i]:
+                self._bar[i] = target
+            else:
+                self._bar[i] = max(target, self._bar[i] - BAR_FALL)
+            # Peak caps sit on new highs, then fall with gravity.
+            if self._bar[i] >= self._peak[i]:
+                self._peak[i] = self._bar[i]
+                self._peak_vel[i] = 0.0
+            else:
+                self._peak_vel[i] += PEAK_GRAVITY
+                self._peak[i] = max(0.0, self._peak[i] - self._peak_vel[i])
+            if self._bar[i] > 0.001 or self._peak[i] > 0.001:
+                moving = True
+        return moving
+
+    def _vis_tick(self):
+        if self._vis_mode == 3:            # visualizer off — no repaints needed
+            return
+        playing = self.ctl.playing
+        raw = getattr(self.ctl, 'spectrum_bands', None) if playing else None
+        moving = self._advance_vis(raw)
+        if playing or moving or self._vis_active:
+            self.update()
+        self._vis_active = playing or moving
+
+    # ---------------------------------------------------------------- helpers
+    def set_skin(self, skin):
+        self.skin = skin
+        self.text_font = TextFont(skin)
+        self.num_font = NumberFont(skin)
+        self._vis_colors = self._load_vis_colors()   # also refreshes accent/peak
+        self.update()
+
+    def _load_skin_file(self):
+        path, _sel = QFileDialog.getOpenFileName(
+            self, _('Load Winamp Skin'), self.ctl.skins_dir(),
+            _('Winamp skins (*.wsz *.zip);;All files (*)'))
+        if path:
+            self.window().load_skin(path)
+
+    def _load_skin_folder(self):
+        path = QFileDialog.getExistingDirectory(
+            self, _('Load Skin Folder'), self.ctl.skins_dir())
+        if path:
+            self.window().load_skin(path)
+
+    def _title_text(self):
+        song = self.ctl.current_song
+        if song is None:
+            return 'PYRRHA'
+        return '{} - {}'.format(song.artist, song.title)
+
+    def _reset_marquee(self):
+        self._scroll = 0
+        self.update()
+
+    def _tick(self):
+        self._scroll += 1
+        self.update()
+
+    def _time_display(self):
+        """(MMSS string, is_remaining). Remaining shows a leading '-'."""
+        pos = self.ctl.query_position()
+        if pos is None:
+            return '    ', False
+        secs = int(pos // 1_000_000_000)
+        if self._time_remaining:
+            dur = self.ctl.query_duration()
+            if dur and dur > 0:
+                secs = max(0, int(dur // 1_000_000_000) - secs)
+                return '{:02d}{:02d}'.format((secs // 60) % 100, secs % 60), True
+        return '{:02d}{:02d}'.format((secs // 60) % 100, secs % 60), False
+
+    def _status_sprite_x(self):
+        if not self.ctl.playing:
+            return 9   # pause
+        return 0       # play
+
+    # ------------------------------------------------------------------ paint
+    def paintEvent(self, event):
+        p = QPainter(self)
+        s = self._scale()
+        if s != 1:
+            p.scale(s, s)   # everything below is drawn in logical coords
+
+        lw = self._lw()
+        gap = lw - W        # extra width to fill (0 at native size)
+        dx = gap            # right-anchored controls shift by this much
+        rkeep = W - SPLIT   # width of the right slice, anchored to the right edge
+
+        # Background: fixed left slice, the skin's own pixels stretched across
+        # the gap (features on the main window run horizontally, so a 1px column
+        # tiles cleanly), then the fixed right slice anchored to the right.
+        p.drawImage(0, 0, self.skin.sprite('main.bmp', 0, 0, SPLIT, H))
+        if gap:
+            p.drawImage(QRect(SPLIT, 0, gap, H),
+                        self.skin.sprite('main.bmp', SPLIT - 1, 0, 1, H))
+        p.drawImage(lw - rkeep, 0, self.skin.sprite('main.bmp', SPLIT, 0, rkeep, H))
+
+        # Title bar: tile the fill across the full width, keep the end corners
+        # (which carry the menu/close/minimize glyphs), and re-center the title
+        # graphic so it stays centered as the window widens.
+        ty = 0 if self.isActiveWindow() else 15
+        p.drawImage(QRect(0, 0, lw, 14),
+                    self.skin.sprite('titlebar.bmp', 27 + TB_CORNER + 1, ty, 1, 14))
+        p.drawImage(0, 0, self.skin.sprite('titlebar.bmp', 27, ty, TB_CORNER, 14))
+        p.drawImage(lw - TB_CORNER, 0,
+                    self.skin.sprite('titlebar.bmp', 27 + W - TB_CORNER, ty, TB_CORNER, 14))
+        p.drawImage((lw - TB_TITLE) // 2, 0,
+                    self.skin.sprite('titlebar.bmp', 27 + (W - TB_TITLE) // 2, ty, TB_TITLE, 14))
+
+        # Playback status indicator (left-anchored).
+        p.drawImage(STATUS_POS[0], STATUS_POS[1],
+                    self.skin.sprite('playpaus.bmp', self._status_sprite_x(), 0, 9, 9))
+
+        # Time (MM SS) (left-anchored); a leading "-" marks remaining time.
+        tstr, remaining = self._time_display()
+        for (x, y), ch in zip(TIME_POS, tstr):
+            p.drawImage(x, y, self.num_font.digit(ch))
+        if remaining:
+            p.drawImage(MINUS_POS[0], MINUS_POS[1], self.num_font.digit('-'))
+
+        # Song-title marquee (clipped, scrolling) — widened to fill the gap.
+        self._paint_marquee(p, gap)
+
+        # Spectrum-analyzer visualization (left-anchored).
+        self._paint_visualizer(p)
+
+        # Bitrate / sample-rate / stereo indicators (left-anchored).
+        self._paint_stream_info(p)
+
+        # Song-progress bar (left-anchored, non-interactive: Pandora can't seek).
+        self._paint_position(p)
+
+        # Volume: filled background frame + handle (left-anchored).
+        level = min(27, max(0, round(self._volume * 27)))
+        p.drawImage(VOLUME.x(), VOLUME.y(),
+                    self.skin.sprite('volume.bmp', 0, level * 15, 68, 13))
+        hx = VOLUME.x() + round(self._volume * (VOLUME.width() - VOL_HANDLE_W))
+        p.drawImage(hx, VOLUME.y() + 1,
+                    self.skin.sprite('volume.bmp',
+                                     0 if self._vol_dragging else 15, 422, VOL_HANDLE_W, 11))
+
+        # Transport buttons (left-anchored).
+        for name, bx, by, w, h, sx, sy_n, sy_p in BUTTONS:
+            sy = sy_p if self._pressed == name else sy_n
+            p.drawImage(bx, by, self.skin.sprite('cbuttons.bmp', sx, sy, w, h))
+
+        # EQ / playlist toggle buttons (right-anchored, lit when the panel is open).
+        shell = self.window()
+        for panel, rect, sx in ((getattr(shell, 'eq', None), EQ_TOGGLE, 0),
+                                (getattr(shell, 'pl', None), PL_TOGGLE, 23)):
+            if panel is not None:
+                sy = 73 if panel._closed else 61   # off / on
+                p.drawImage(rect.x() + dx, rect.y(),
+                            self.skin.sprite('shufrep.bmp', sx, sy, 23, 12))
+        p.end()
+
+    def _paint_marquee(self, p, gap):
+        img = self.text_font.render(self._title_text() + '   ***   ')
+        area = QRect(TITLE_AREA.x(), TITLE_AREA.y(),
+                     TITLE_AREA.width() + gap, TITLE_AREA.height())
+        p.save()
+        p.setClipRect(area)
+        span = max(img.width(), area.width())
+        off = self._scroll % span if img.width() > area.width() else 0
+        p.drawImage(area.x() - off, area.y(), img)
+        if off:  # wrap-around copy
+            p.drawImage(area.x() - off + span, area.y(), img)
+        p.restore()
+
+    def _paint_position(self, p):
+        # Groove background from the skin, then a blue (accent) progress fill.
+        p.drawImage(POSBAR.x(), POSBAR.y(), self.skin.sprite('posbar.bmp', 0, 0, 248, 10))
+        pos = self.ctl.query_position()
+        dur = self.ctl.query_duration()
+        if not (pos and dur and dur > 0):
+            return
+        frac = min(1.0, max(0.0, pos / dur))
+        fill_w = int(frac * (POSBAR.width() - 2))
+        if fill_w <= 0:
+            return
+        r = QRect(POSBAR.x() + 1, POSBAR.y() + 2, fill_w, POSBAR.height() - 4)
+        p.fillRect(r, self._accent)
+        p.fillRect(QRect(r.right() - 1, r.y(), 2, r.height()), self._peak_color)  # bright cap
+
+    def _paint_stream_info(self, p):
+        bitrate, rate, channels = self.ctl.audio_stream_info()
+        if bitrate:
+            p.drawImage(KBPS_POS[0], KBPS_POS[1], self.text_font.render('%3d' % bitrate))
+        if rate:
+            p.drawImage(KHZ_POS[0], KHZ_POS[1],
+                        self.text_font.render('%2d' % round(rate / 1000)))
+        stereo_y = 0 if channels == 2 else 12    # lit / dim
+        mono_y = 0 if channels == 1 else 12
+        p.drawImage(STEREO_POS[0], STEREO_POS[1],
+                    self.skin.sprite('monoster.bmp', 0, stereo_y, 29, 12))
+        p.drawImage(MONO_POS[0], MONO_POS[1],
+                    self.skin.sprite('monoster.bmp', 29, mono_y, 27, 12))
+
+    def _paint_visualizer(self, p):
+        if self._vis_mode == 3:        # off
+            return
+        colors = self._vis_colors
+        top_row = len(colors) - 1
+        bar_w = max(1, VIS.width() // VIS_BARS)
+        w = max(1, bar_w - 1)          # 1px gap between bars
+        bottom = VIS.bottom()
+        height = VIS.height()
+        for i in range(VIS_BARS):
+            x = VIS.x() + i * bar_w
+            h = int(round(self._bar[i] * height))
+            if self._vis_mode == 1:    # thin lines (1px wide)
+                for row in range(h):
+                    p.fillRect(x, bottom - row, 1, 1, colors[min(row, top_row)])
+            elif self._vis_mode == 2:  # dots (top of each bar only)
+                if h > 0:
+                    p.fillRect(x, bottom - (h - 1), w, 1, colors[min(h - 1, top_row)])
+            else:                      # bars (filled) with a falling peak cap
+                for row in range(h):
+                    p.fillRect(x, bottom - row, w, 1, colors[min(row, top_row)])
+                pr = int(round(self._peak[i] * (height - 1)))
+                if pr > 0:
+                    p.fillRect(x, bottom - pr, w, 1, self._peak_color)
+
+    # ------------------------------------------------------------------ mouse
+    def _button_at(self, pos):
+        for name, dx, dy, w, h, *_ in BUTTONS:
+            if QRect(dx, dy, w, h).contains(pos):
+                return name
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        pos = (event.position() / self._scale()).toPoint()   # logical coords
+        dx = self._dx()
+        if MENU.contains(pos):
+            self._show_menu(event.globalPosition().toPoint())
+            return
+        if CLOSE.translated(dx, 0).contains(pos):
+            self.ctl.quit()
+            return
+        if any(r.translated(dx, 0).contains(pos) for r in MINIMIZE):
+            self.window().showMinimized()
+            return
+        if EQ_TOGGLE.translated(dx, 0).contains(pos):
+            self.window().toggle_panel(getattr(self.window(), 'eq', None))
+            return
+        if PL_TOGGLE.translated(dx, 0).contains(pos):
+            self.window().toggle_panel(getattr(self.window(), 'pl', None))
+            return
+        if TIME_RECT.contains(pos):        # toggle elapsed <-> remaining
+            self._time_remaining = not self._time_remaining
+            self.update()
+            return
+        if VIS.contains(pos):              # cycle visualizer mode
+            self._vis_mode = (self._vis_mode + 1) % 4
+            self.update()
+            return
+        name = self._button_at(pos)
+        if name:
+            self._pressed = name
+            self.update()
+            return
+        if VOLUME.adjusted(0, -2, 0, 2).contains(pos):
+            self._vol_dragging = True
+            self._set_volume_from_x(pos.x())
+            return
+        if pos.y() < TITLEBAR[3]:   # drag the whole shell by the title bar
+            handle = self.window().windowHandle()
+            if handle is not None:
+                handle.startSystemMove()   # compositor-driven move (Wayland/X11)
+
+    def mouseMoveEvent(self, event):
+        if self._vol_dragging:
+            self._set_volume_from_x((event.position() / self._scale()).x())
+
+    def mouseReleaseEvent(self, event):
+        pos = event.position().toPoint()
+        if self._pressed:
+            if self._button_at(pos) == self._pressed:
+                self._activate(self._pressed)
+            self._pressed = None
+            self.update()
+        self._vol_dragging = False
+        self._win_drag = None
+
+    def _set_volume_from_x(self, x):
+        frac = (x - VOLUME.x()) / max(1, VOLUME.width() - VOL_HANDLE_W)
+        self._volume = min(1.0, max(0.0, frac))
+        self.ctl.set_player_volume(self._volume)
+        self.ctl.settings.set_double('volume', self._volume)
+        self.update()
+
+    def _activate(self, name):
+        c = self.ctl
+        if name == 'play':
+            c.user_play()
+        elif name == 'pause':
+            c.user_pause()
+        elif name == 'stop':
+            c.stop()
+        elif name == 'next':
+            c.next_song()
+        elif name == 'eject':
+            # Eject opens the station switcher, popped below the eject button.
+            s = self._scale()
+            for n, dx, dy, w, h, *_ in BUTTONS:
+                if n == 'eject':
+                    self._show_stations_menu(
+                        self.mapToGlobal(QPoint(int(dx * s), int((dy + h) * s))))
+                    break
+        # 'prev' is a no-op: Pandora streams can't be rewound.
+
+    def _populate_stations(self, menu):
+        """Fill a menu with the user's stations; picking one switches to it."""
+        c = self.ctl
+        rows = getattr(c, 'stations_model', None) or []
+        if not rows:
+            act = menu.addAction(_('(no stations loaded yet)'))
+            act.setEnabled(False)
+            return
+        for station, name, index in rows:
+            act = menu.addAction(name, lambda *a, s=station: c.station_changed(s))
+            act.setCheckable(True)
+            act.setChecked(station is c.current_station)
+
+    def _show_stations_menu(self, global_pos):
+        menu = QMenu(self)
+        self._populate_stations(menu)
+        menu.addSeparator()
+        menu.addAction(_('Manage Stations…'), self.ctl.show_stations)
+        menu.exec(global_pos)
+
+    def _show_menu(self, global_pos):
+        c = self.ctl
+        menu = QMenu(self)
+        stations = menu.addMenu(_('Stations'))
+        self._populate_stations(stations)
+        stations.addSeparator()
+        stations.addAction(_('Manage Stations…'), c.show_stations)
+        menu.addAction(_('Preferences…'), c.show_preferences)
+        menu.addAction(_('About Pyrrha'), c.show_about)
+        menu.addSeparator()
+        menu.addAction(_('Love'), lambda: c.love_song())
+        menu.addAction(_('Ban'), lambda: c.ban_song())
+        menu.addAction(_('Tired'), lambda: c.tired_song())
+        menu.addSeparator()
+        size = menu.addMenu(_('Size'))
+        cur = getattr(self.window(), 'scale', 1)
+        for label, sc in ((_('Normal (1x)'), 1.0), (_('1.5x'), 1.5), (_('Double (2x)'), 2.0)):
+            a = size.addAction(label, lambda *args, v=sc: self.window().set_scale(v))
+            a.setCheckable(True)
+            a.setChecked(abs(cur - sc) < 0.01)
+        skin_menu = menu.addMenu(_('Skin'))
+        skin_menu.addAction(_('Load Skin File…'), self._load_skin_file)
+        skin_menu.addAction(_('Load Skin Folder…'), self._load_skin_folder)
+        available = c.available_skins()
+        if available:
+            skin_menu.addSeparator()
+            current = getattr(self.window(), 'skin', None)
+            current_path = getattr(current, 'path', None)
+            for name, path in available:
+                a = skin_menu.addAction(name, lambda *args, p=path: self.window().load_skin(p))
+                a.setCheckable(True)
+                a.setChecked(path == current_path)
+        menu.addAction(_('Standard Window'), c.show_standard_view)
+        menu.addSeparator()
+        menu.addAction(_('Quit'), c.quit)
+        menu.exec(global_pos)
+
+    def _scale(self):
+        return getattr(self.window(), 'scale', 1)
+
+    def _lw(self):
+        return max(W, int(getattr(self.window(), 'content_w', W)))
+
+    def _dx(self):
+        return self._lw() - W
+
+    def display_width(self):
+        return int(self._lw() * self._scale())   # stretches to the shell width
+
+    def display_height(self):
+        return int(H * self._scale())   # the main panel never collapses
+
+    def closeEvent(self, event):
+        # Only fires when used stand-alone; inside the shell the shell quits.
+        self.ctl.quit()
+        super().closeEvent(event)
+
+
+class SkinnedShell(QWidget):
+    """A single frameless window holding the main, EQ and playlist panels
+    stacked vertically. This is the one window the user sees and moves. Panels
+    can collapse (windowshade) or close; the shell reflows and resizes to fit."""
+
+    def __init__(self, controller, skin, scale=1.0):
+        super().__init__(None, Qt.FramelessWindowHint)
+        self.ctl = controller
+        self.skin = skin        # current skin (swappable at runtime)
+        self.scale = scale      # UI scale factor (1, 1.5, 2, …)
+        self.content_w = W      # shared logical content width (all panels stretch to it)
+        self.setWindowTitle('Pyrrha')
+        # Fills any area not covered by a panel (e.g. to the right of the
+        # fixed-width main/EQ when the playlist is dragged wider).
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), Qt.black)
+        self.setPalette(pal)
+
+        self.main = SkinnedWindow(controller, skin, parent=self)
+        self.eq = SkinnedEqWindow(controller, skin, parent=self) if skin.has('eqmain.bmp') else None
+        self.pl = SkinnedPlaylistWindow(controller, skin, parent=self) if skin.has('pledit.bmp') else None
+        self.relayout()
+
+    def _max_content_w(self):
+        # When the EQ is present, the space to its right shows the album art;
+        # cap the width so that area is at most a square (its height is the EQ
+        # height, H), which bounds how far the window can be dragged.
+        if self.eq is not None and not self.eq._closed:
+            return W + H
+        return WMAX
+
+    def relayout(self):
+        panels = [p for p in (self.main, self.eq, self.pl)
+                  if p is not None and not getattr(p, '_closed', False)]
+        # Shared content width drives the stretchable panels (main + playlist)
+        # and the album-art area beside the EQ. The shell grows to the widest
+        # panel.
+        self.content_w = max(W, min(self._max_content_w(), int(self.content_w)))
+        shell_w = max((p.display_width() for p in panels), default=int(W * self.scale))
+        y = 0
+        for i, p in enumerate(panels):
+            p._is_bottom = (i == len(panels) - 1)   # only the last panel has the grip
+            p.setFixedSize(p.display_width(), p.display_height())
+            p.move(0, y)
+            p.setVisible(True)
+            y += p.display_height()
+        self.setFixedSize(shell_w, y)
+        for p in panels:
+            p.update()
+
+    def set_content_width(self, logical_w):
+        self.content_w = max(W, min(self._max_content_w(), int(logical_w)))
+        self.relayout()
+
+    def load_skin(self, path):
+        """Switch to another skin at runtime and repaint everything."""
+        from .skin import Skin
+        try:
+            skin = Skin(path)
+        except Exception as e:
+            logging.warning('Failed to load skin %s: %s', path, e)
+            return False
+        if not skin.has('main.bmp'):
+            logging.warning('Not a valid Winamp skin (no main.bmp): %s', path)
+            return False
+        self.skin = skin
+        for panel in (self.main, self.eq, self.pl):
+            if panel is not None:
+                panel.set_skin(skin)
+        self.relayout()
+        self.ctl.set_last_skin(path)
+        return True
+
+    def toggle_width(self):
+        """Widen the player to reveal the album art beside the EQ (a square),
+        or collapse back to native width. Only meaningful with the EQ open."""
+        if self.eq is None or self.eq._closed:
+            return
+        self.set_content_width(W if self.content_w > W else W + H)
+
+    def set_scale(self, scale):
+        self.scale = max(1.0, min(4.0, scale))
+        self.relayout()
+        for panel in (self.main, self.eq, self.pl):
+            if panel is not None:
+                panel.update()
+
+    def toggle_scale(self):
+        self.set_scale(2 if self.scale == 1 else 1)
+
+    def toggle_panel(self, panel):
+        """Open a closed panel or close an open one (the main window's EQ/PL
+        buttons and each panel's own close button share this state)."""
+        if panel is None:
+            return
+        panel._closed = not panel._closed
+        if panel._closed:
+            panel.hide()
+            if panel is self.pl:
+                self.content_w = W   # collapse the player back to default width
+        self.relayout()
+
+    def closeEvent(self, event):
+        self.ctl.quit()
+        super().closeEvent(event)

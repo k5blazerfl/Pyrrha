@@ -30,6 +30,10 @@ def main():
     parser.add_argument('-t', '--test', action='store_true',
                         help='Use a mock service instead of the real Pandora server')
     parser.add_argument('--version', action='store_true', help='Show the version')
+    parser.add_argument('--skin', metavar='FILE',
+                        help='Use a classic Winamp (.wsz) skinned UI (prototype)')
+    parser.add_argument('--scale', type=float, default=1.0,
+                        help='Initial skinned-UI scale factor (e.g. 1, 1.5, 2)')
     args = parser.parse_args()
 
     if args.version:
@@ -74,7 +78,17 @@ def main():
     # Import the window only after the gettext ``_`` is set up.
     from .window import PyrrhaWindow
     window = PyrrhaWindow(app, test_mode=args.test)
-    window.show()
+
+    if args.skin:
+        # The native window becomes the (hidden) controller; the skinned window
+        # is the visible face over it.
+        from .skinned.skin import Skin
+        from .skinned.window import SkinnedShell
+        skinned = SkinnedShell(window, Skin(args.skin), scale=args.scale)
+        window.set_skinned_shell(skinned)   # enables the view toggle in both menus
+        skinned.show()
+    else:
+        window.show()
 
     return app.exec()
 

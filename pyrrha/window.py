@@ -76,6 +76,13 @@ except AttributeError:
 # 15 days in seconds to retain album art files.
 ART_CACHE_TIME = 1.296e+6
 
+# Spectrum analyzer (drives the skinned Winamp visualizer). Magnitudes are
+# posted as dB in [SPECTRUM_THRESHOLD, 0]; the skinned window reads
+# ``spectrum_bands`` (normalized 0..1).
+SPECTRUM_BANDS = 256
+SPECTRUM_THRESHOLD = -80
+_SPECTRUM_RE = re.compile(r'magnitude=\(float\)\{([^}]*)\}')
+
 
 def parse_proxy(proxy):
     """``_parse_proxy`` from urllib, copied from Pithos' util so we never pull
@@ -183,20 +190,30 @@ class PyrrhaWindow(QMainWindow):
         self.rglimiter = Gst.ElementFactory.make("rglimiter", "rglimiter")
         self.rglimiter.set_property("enabled", False)
         self.equalizer = Gst.ElementFactory.make("equalizer-10bands", "equalizer-10bands")
+        # Spectrum analyzer feeding the skinned visualizer (optional element).
+        self.spectrum_bands = [0.0] * SPECTRUM_BANDS
+        self.spectrum = Gst.ElementFactory.make("spectrum", "spectrum")
+        if self.spectrum is not None:
+            self.spectrum.set_property("bands", SPECTRUM_BANDS)
+            self.spectrum.set_property("threshold", SPECTRUM_THRESHOLD)
+            self.spectrum.set_property("interval", 50 * Gst.MSECOND)
+            self.spectrum.set_property("post-messages", True)
+            self.spectrum.set_property("message-magnitude", True)
+            self.spectrum.set_property("message-phase", False)
         audioconvert = Gst.ElementFactory.make("audioconvert", "audioconvert")
         audioresample = Gst.ElementFactory.make("audioresample", "audioresample")
         audioresample.set_property("quality", RESAMPLER_QUALITY_MAX)
         audioresample.set_property("sinc-filter-mode", RESAMPLER_FILTER_MODE_FULL)
         audiosink = Gst.ElementFactory.make("autoaudiosink", "audiosink")
         sinkbin = Gst.Bin()
-        for element in (self.rgvolume, self.rglimiter, self.equalizer,
-                        audioconvert, audioresample, audiosink):
+        chain = [self.rgvolume, self.rglimiter, self.equalizer]
+        if self.spectrum is not None:
+            chain.append(self.spectrum)
+        chain += [audioconvert, audioresample, audiosink]
+        for element in chain:
             sinkbin.add(element)
-        self.rgvolume.link(self.rglimiter)
-        self.rglimiter.link(self.equalizer)
-        self.equalizer.link(audioconvert)
-        audioconvert.link(audioresample)
-        audioresample.link(audiosink)
+        for a, b in zip(chain, chain[1:]):
+            a.link(b)
         sinkbin.add_pad(Gst.GhostPad.new("sink", self.rgvolume.get_static_pad("sink")))
         self.player.set_property("audio-sink", sinkbin)
 
@@ -231,6 +248,8 @@ class PyrrhaWindow(QMainWindow):
         self.playlist_update_timer_id = 0
         self.worker = Worker()
         self._status_messages = {}
+        self._station_eq = self._load_station_eq()
+        self.skinned_shell = None    # set by __main__ when launched with --skin
 
         try:
             tempdir_base = '/var/tmp'
@@ -338,10 +357,36 @@ class PyrrhaWindow(QMainWindow):
     def _skip_icon(self):
         return self._themed_or_standard('media-skip-forward', QStyle.SP_MediaSkipForward)
 
+    def set_skinned_shell(self, shell):
+        """Register the Winamp-skinned shell so the two views can toggle."""
+        self.skinned_shell = shell
+        if getattr(self, '_skin_action', None) is not None:
+            self._skin_action.setVisible(shell is not None)
+
+    def show_standard_view(self):
+        """Switch from the skinned UI to the standard (native) window."""
+        if self.skinned_shell is not None:
+            self.skinned_shell.hide()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def show_skinned_view(self):
+        """Switch from the standard window to the skinned UI."""
+        if self.skinned_shell is None:
+            return
+        self.hide()
+        self.skinned_shell.show()
+        self.skinned_shell.raise_()
+        self.skinned_shell.activateWindow()
+
     def _build_main_menu(self):
         menu = QMenu(self)
         menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
         menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
+        menu.addSeparator()
+        self._skin_action = menu.addAction(_('Winamp Skin'), self.show_skinned_view)
+        self._skin_action.setVisible(False)   # shown once a skin is available
         menu.addSeparator()
         menu.addAction(_('Help'), lambda: self.open_url('https://github.com/pithos/pithos/wiki'))
         menu.addAction(_('About'), self.show_about)
@@ -977,6 +1022,10 @@ class PyrrhaWindow(QMainWindow):
                          "it or try another quality setting."))
 
     def on_gst_element(self, bus, message):
+        struct = message.get_structure()
+        if struct is not None and struct.get_name() == 'spectrum':
+            self._update_spectrum(struct)
+            return
         if GstPbutils.is_missing_plugin_message(message):
             if GstPbutils.install_plugins_supported():
                 details = GstPbutils.missing_plugin_message_get_installer_detail(message)
@@ -986,6 +1035,122 @@ class PyrrhaWindow(QMainWindow):
                     _("Missing codec"), None,
                     submsg=_("GStreamer is missing a plugin and it could not be automatically "
                              "installed. Either manually install it or try another quality setting."))
+
+    def _update_spectrum(self, struct):
+        # PyGObject can't return the GstValueList directly, so parse the
+        # structure's string form (magnitudes in dB) and normalize to 0..1.
+        m = _SPECTRUM_RE.search(struct.to_string())
+        if not m:
+            return
+        floor = float(SPECTRUM_THRESHOLD)
+        bands = []
+        for tok in m.group(1).split(','):
+            try:
+                db = float(tok)
+            except ValueError:
+                continue
+            bands.append(min(1.0, max(0.0, (db - floor) / -floor)))
+        if bands:
+            self.spectrum_bands = bands
+
+    # --------------------------------------------------- per-station EQ
+    def _station_eq_file(self):
+        d = os.path.join(GLib.get_user_config_dir(), 'pyrrha')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'station_eq.json')
+
+    def _load_station_eq(self):
+        try:
+            with open(self._station_eq_file()) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (IOError, ValueError):
+            return {}
+
+    def get_station_eq(self, station_id):
+        """Saved EQ ({'bands': [...], 'preamp': float}) for a station, or None."""
+        if station_id is None:
+            return None
+        return self._station_eq.get(str(station_id))
+
+    def set_station_eq(self, station_id, bands, preamp):
+        """Remember the EQ curve for a station (persisted to disk)."""
+        if station_id is None:
+            return
+        self._station_eq[str(station_id)] = {
+            'bands': [float(b) for b in bands], 'preamp': float(preamp)}
+        try:
+            with open(self._station_eq_file(), 'w') as f:
+                json.dump(self._station_eq, f)
+        except IOError:
+            logging.warning('Failed to save the per-station EQ')
+
+    def audio_stream_info(self):
+        """(bitrate_kbps, sample_rate_hz, channels) for the current stream; any
+        field may be None. Drives the skinned kbps/kHz/stereo indicators."""
+        bitrate = None
+        song = self.current_song
+        if song is not None and getattr(song, 'bitrate', None) is not None:
+            try:
+                bitrate = int(song.bitrate)
+            except (TypeError, ValueError):
+                bitrate = None
+        rate = channels = None
+        try:
+            pad = self.rgvolume.get_static_pad('sink')
+            caps = pad.get_current_caps() if pad is not None else None
+            if caps is not None and caps.get_size() > 0:
+                s = caps.get_structure(0)
+                ok, rate = s.get_int('rate')
+                rate = rate if ok else None
+                ok, channels = s.get_int('channels')
+                channels = channels if ok else None
+        except Exception:
+            pass
+        return bitrate, rate, channels
+
+    # --------------------------------------------------- skin selection
+    def _last_skin_file(self):
+        d = os.path.join(GLib.get_user_config_dir(), 'pyrrha')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'skin.txt')
+
+    def get_last_skin(self):
+        try:
+            with open(self._last_skin_file()) as f:
+                return f.read().strip() or None
+        except IOError:
+            return None
+
+    def set_last_skin(self, path):
+        try:
+            with open(self._last_skin_file(), 'w') as f:
+                f.write(path)
+        except IOError:
+            logging.warning('Failed to save the last skin path')
+
+    def skins_dir(self):
+        return os.path.join(GLib.get_user_data_dir(), 'pyrrha', 'skins')
+
+    def available_skins(self):
+        """[(name, path)] of skins in the user skins directory (~/.local/share/
+        pyrrha/skins): .wsz files and folders that contain a main.bmp."""
+        out = []
+        try:
+            entries = sorted(os.listdir(self.skins_dir()))
+        except OSError:
+            return out
+        for name in entries:
+            full = os.path.join(self.skins_dir(), name)
+            if os.path.isdir(full):
+                try:
+                    if any(f.lower() == 'main.bmp' for f in os.listdir(full)):
+                        out.append((name, full))
+                except OSError:
+                    pass
+            elif name.lower().endswith(('.wsz', '.zip')):
+                out.append((os.path.splitext(name)[0], full))
+        return out
 
     def on_gst_error(self, bus, message):
         err, debug = message.parse_error()
