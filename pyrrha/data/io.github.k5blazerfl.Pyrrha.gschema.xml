@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Pyrrha settings schema. Structure mirrors Pithos' io.github.Pithos schema
+     (a one-time migration copies an existing Pithos config across). -->
+<schemalist>
+  <schema path="/io/github/k5blazerfl/Pyrrha/" id="io.github.k5blazerfl.Pyrrha" gettext-domain="pyrrha">
+
+    <key type="s" name="email">
+      <default>""</default>
+      <summary>Email address for Pandora account</summary>
+    </key>
+
+    <key type="b" name="pandora-one">
+      <default>false</default>
+      <summary>If account has subscribed to Pandora One</summary>
+    </key>
+
+    <key type="b" name="sort-stations">
+      <default>false</default>
+      <summary>Sort the stations list in the popup alphabetically</summary>
+    </key>
+
+    <key type="s" name="last-station-id">
+      <default>""</default>
+      <summary>ID of last station played</summary>
+    </key>
+
+    <key type="s" name="proxy">
+      <default>""</default>
+      <summary>Proxy address for all connections</summary>
+    </key>
+
+    <key type="s" name="control-proxy">
+      <default>""</default>
+      <summary>Proxy address for pandora connection (not data)</summary>
+    </key>
+
+    <key name="control-proxy-pac" type="s">
+      <default>""</default>
+      <summary>Address to PAC</summary>
+    </key>
+
+    <key name="force-client" type="s">
+      <default>""</default>
+      <summary>Custom JSON to send to Pandora for client info</summary>
+    </key>
+
+    <key type="(ii)" name="win-pos">
+      <default>(0,0)</default>
+      <summary>Position of window</summary>
+    </key>
+
+    <key type="d" name="volume">
+      <default>0.7</default>
+      <range min="0.0" max="1.0"/>
+      <summary>Volume of player</summary>
+    </key>
+
+    <key type="s" name="audio-quality">
+      <choices>
+        <choice value="lowQuality"/>
+        <choice value="mediumQuality"/>
+        <choice value="highQuality"/>
+      </choices>
+      <default>"highQuality"</default>
+      <summary>Quality of songs</summary>
+    </key>
+
+    <child name="mediakeys" schema="io.github.k5blazerfl.Pyrrha.plugin-enabled"/>
+    <child name="screensaver-pause" schema="io.github.k5blazerfl.Pyrrha.plugin-enabled"/>
+    <child name="mpris" schema="io.github.k5blazerfl.Pyrrha.plugin-enabled"/>
+    <child name="journald-logging" schema="io.github.k5blazerfl.Pyrrha.plugin-enabled"/>
+    <child name="notify" schema="io.github.k5blazerfl.Pyrrha.plugin"/>
+    <child name="lastfm" schema="io.github.k5blazerfl.Pyrrha.plugin"/>
+    <child name="notification-icon" schema="io.github.k5blazerfl.Pyrrha.plugin"/>
+
+  </schema>
+
+  <schema id="io.github.k5blazerfl.Pyrrha.plugin" gettext-domain="pyrrha">
+    <key type="b" name="enabled">
+      <default>false</default>
+      <summary>If the plugin is loaded</summary>
+    </key>
+    <key type="s" name="data">
+      <default>""</default>
+      <summary>Custom data set by plugin</summary>
+    </key>
+  </schema>
+
+  <!-- Plugins that default to enabled. -->
+  <schema id="io.github.k5blazerfl.Pyrrha.plugin-enabled" gettext-domain="pyrrha">
+    <key type="b" name="enabled">
+      <default>true</default>
+      <summary>If the plugin is loaded</summary>
+    </key>
+    <key type="s" name="data">
+      <default>""</default>
+      <summary>Custom data set by plugin</summary>
+    </key>
+  </schema>
+</schemalist>

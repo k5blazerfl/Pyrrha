@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Pyrrha
+GenericName=Pandora Radio Client
+Comment=Listen to Pandora Radio
+Icon=io.github.k5blazerfl.Pyrrha
+Exec=/home/charron/Pyrrha/.venv-qt/bin/pyrrha
+Terminal=false
+Categories=AudioVideo;Audio;Player;GTK;
+Keywords=Pandora;Radio;Music;
+StartupNotify=true
+StartupWMClass=pyrrha

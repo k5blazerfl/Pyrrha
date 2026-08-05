@@ -1,0 +1,1323 @@
+# -*- coding: utf-8 -*-
+# Pyrrha - a Qt port of Pithos.
+# Ported from Pithos' pithos.py (C) 2010-2012 Kevin Mehall and contributors.
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 3.
+
+"""The main Pyrrha window.
+
+This is a faithful port of Pithos' ``PithosWindow`` to Qt.  The controller
+logic (Pandora connection flow, the playback state machine, playlist fetching,
+ratings) is preserved almost verbatim; only the *view* changes from GTK widgets
+to Qt.  The GStreamer pipeline is built exactly as in Pithos and its bus is
+watched through the GLib main context, which
+:class:`pyrrha.glib_bridge.GLibBridge` keeps serviced from the Qt event loop.
+"""
+
+import html
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from enum import Enum
+
+import gi
+gi.require_version('Gst', '1.0')
+gi.require_version('GstAudio', '1.0')
+gi.require_version('GstPbutils', '1.0')
+from gi.repository import Gst, GstAudio, GstPbutils, Gio, GLib
+
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractItemView, QHBoxLayout, QListView, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QSlider, QStatusBar, QStyle, QToolButton, QVBoxLayout, QWidget,
+)
+
+from .pandora import make_pandora
+from .pandora import (
+    PandoraError, PandoraAuthTokenInvalid, PandoraAPIVersionError,
+    RATE_BAN, RATE_LOVE, RATE_NONE,
+)
+from .pandora.data import (
+    client_keys, default_client_id, default_one_client_id,
+)
+
+from . import SETTINGS_SCHEMA, __version__
+from .appicon import app_icon
+from .keyring import SecretService, is_flatpak
+from .models import ALBUM_ART_SIZE, AlbumArtDelegate, SongsModel, SongRole
+from .stations_popover import StationsPopover
+from .worker import Worker
+from .plugin_loader import load_plugins
+from .dialogs.preferences import PreferencesDialog
+from .dialogs.stations import StationsDialog
+from .dialogs.about import AboutDialog
+
+try:
+    import pacparser
+except ImportError:
+    pacparser = None
+
+try:
+    RESAMPLER_QUALITY_MAX = GstAudio.AUDIO_RESAMPLER_QUALITY_MAX
+    RESAMPLER_FILTER_MODE_FULL = GstAudio.AudioResamplerFilterMode.FULL
+except AttributeError:
+    RESAMPLER_QUALITY_MAX = 10
+    RESAMPLER_FILTER_MODE_FULL = 1
+
+# 15 days in seconds to retain album art files.
+ART_CACHE_TIME = 1.296e+6
+
+
+def parse_proxy(proxy):
+    """``_parse_proxy`` from urllib, copied from Pithos' util so we never pull
+    GTK into the Qt process just to configure the GStreamer source's proxy."""
+    from urllib.parse import splittype, splituser, splitpasswd
+    scheme, r_scheme = splittype(proxy)
+    if not r_scheme.startswith("/"):
+        scheme = None
+        authority = proxy
+    else:
+        if not r_scheme.startswith("//"):
+            raise ValueError("proxy URL with no authority: %r" % proxy)
+        end = r_scheme.find("/", 2)
+        if end == -1:
+            end = None
+        authority = r_scheme[2:end]
+    userinfo, hostport = splituser(authority)
+    if userinfo is not None:
+        user, password = splitpasswd(userinfo)
+    else:
+        user = password = None
+    return scheme, user, password, hostport
+
+
+class PseudoGst(Enum):
+    """Aliases to Gst.State plus our own BUFFERING pseudo-state (as in Pithos)."""
+    PLAYING = 1
+    PAUSED = 2
+    BUFFERING = 3
+    STOPPED = 4
+
+    @property
+    def state(self):
+        return {
+            1: Gst.State.PLAYING,
+            2: Gst.State.PAUSED,
+            3: Gst.State.PAUSED,
+            4: Gst.State.NULL,
+        }[self.value]
+
+
+class PyrrhaWindow(QMainWindow):
+    # Signals mirroring Pithos' gsignals, for the (future) plugin layer.
+    song_changed = Signal(object)
+    song_ended = Signal(object)
+    play_state_changed = Signal(bool)
+    user_changed_play_state = Signal(bool)
+    metadata_changed = Signal(object)
+    buffering_finished = Signal(object)
+    station_changed_sig = Signal(object)
+    stations_processed = Signal(object)
+    station_added_sig = Signal(object)     # Station
+    station_removed_sig = Signal(object)   # Station
+    station_renamed_sig = Signal(object)   # (station_id, new_name)
+    songs_added = Signal(int)
+
+    def __init__(self, app, test_mode=False):
+        super().__init__()
+        self.app = app
+        self.setWindowTitle('Pyrrha')
+        self.setWindowIcon(app_icon())
+
+        self.settings = Gio.Settings.new(SETTINGS_SCHEMA)
+        self.settings.connect('changed::audio-quality', lambda *a: self.set_audio_quality())
+        self.settings.connect('changed::proxy', lambda *a: self.set_proxy())
+        self.settings.connect('changed::control-proxy', lambda *a: self.set_proxy())
+        self.settings.connect('changed::control-proxy-pac', lambda *a: self.set_proxy())
+
+        self.prefs_dlg = PreferencesDialog(self)
+        self.prefs_dlg.login_changed.connect(self.pandora_reconnect)
+        self.prefs_dlg.applied.connect(self.on_explicit_content_filter_checkbox)
+        self.prefs_dlg.finished.connect(self.on_prefs_finished)
+
+        self.stations_dlg = None
+        # Plugins may register callables here to intercept window close
+        # (return True to hide instead of quit); see closeEvent.
+        self.close_interceptors = []
+
+        self.init_core()
+        self.init_ui()
+        self.init_actions()
+
+        self.plugins = {}
+        load_plugins(self)
+
+        self.pandora = make_pandora(test_mode)
+        self.set_proxy(reconnect=False)
+        self.set_audio_quality()
+        SecretService.unlock_keyring(self.on_keyring_unlocked)
+
+    # ------------------------------------------------------------------ core
+    def init_core(self):
+        # Station rows shared with the dialogs: list of [station, name, index].
+        self.stations_model = []
+
+        Gst.init(None)
+        self._query_duration = Gst.Query.new_duration(Gst.Format.TIME)
+        self._query_position = Gst.Query.new_position(Gst.Format.TIME)
+        self._query_buffer = Gst.Query.new_buffering(Gst.Format.PERCENT)
+
+        self.player = Gst.ElementFactory.make("playbin3", "player")
+        self.player.set_property('buffer-duration', 3 * Gst.SECOND)
+        self.rgvolume = Gst.ElementFactory.make("rgvolume", "rgvolume")
+        self.rgvolume.set_property("album-mode", False)
+        self.rglimiter = Gst.ElementFactory.make("rglimiter", "rglimiter")
+        self.rglimiter.set_property("enabled", False)
+        self.equalizer = Gst.ElementFactory.make("equalizer-10bands", "equalizer-10bands")
+        audioconvert = Gst.ElementFactory.make("audioconvert", "audioconvert")
+        audioresample = Gst.ElementFactory.make("audioresample", "audioresample")
+        audioresample.set_property("quality", RESAMPLER_QUALITY_MAX)
+        audioresample.set_property("sinc-filter-mode", RESAMPLER_FILTER_MODE_FULL)
+        audiosink = Gst.ElementFactory.make("autoaudiosink", "audiosink")
+        sinkbin = Gst.Bin()
+        for element in (self.rgvolume, self.rglimiter, self.equalizer,
+                        audioconvert, audioresample, audiosink):
+            sinkbin.add(element)
+        self.rgvolume.link(self.rglimiter)
+        self.rglimiter.link(self.equalizer)
+        self.equalizer.link(audioconvert)
+        audioconvert.link(audioresample)
+        audioresample.link(audiosink)
+        sinkbin.add_pad(Gst.GhostPad.new("sink", self.rgvolume.get_static_pad("sink")))
+        self.player.set_property("audio-sink", sinkbin)
+
+        bus = self.player.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message::stream-start", self.on_gst_stream_start)
+        bus.connect("message::eos", self.on_gst_eos)
+        bus.connect("message::buffering", self.on_gst_buffering)
+        bus.connect("message::error", self.on_gst_error)
+        bus.connect("message::element", self.on_gst_element)
+        self.player.connect("notify::volume", self.on_gst_volume)
+        self.player.connect("notify::source", self.on_gst_source)
+
+        self._current_state = PseudoGst.STOPPED
+        self._buffer_recovery_state = PseudoGst.STOPPED
+
+        self.current_song_index = None
+        self.current_station = None
+        self.current_station_id = self.settings['last-station-id']
+
+        self.auto_retrying_auth = False
+        self.have_stations = False
+        self.playcount = 0
+        self.gstreamer_errorcount_1 = 0
+        self.gstreamer_errorcount_2 = 0
+        self.gstreamer_error = ''
+        self.waiting_for_playlist = False
+        self.start_new_playlist = False
+        self.filter_state = None
+        self.buffering_timer_id = 0
+        self.ui_loop_timer_id = 0
+        self.playlist_update_timer_id = 0
+        self.worker = Worker()
+        self._status_messages = {}
+
+        try:
+            tempdir_base = '/var/tmp'
+            if is_flatpak():
+                tempdir_base = os.path.join(GLib.get_user_cache_dir(), 'tmp')
+            self.tempdir = os.path.join(tempdir_base, 'pyrrha_cache')
+            os.makedirs(self.tempdir, exist_ok=True)
+        except IOError as e:
+            self.tempdir = None
+            logging.warning('Failed to create a temporary directory: {}'.format(e))
+
+    @property
+    def playing(self):
+        return self._buffer_recovery_state is not PseudoGst.PAUSED
+
+    # -------------------------------------------------------------------- ui
+    def init_ui(self):
+        self.songs_model = SongsModel(self)
+        self.songs_view = QListView()
+        self.songs_view.setModel(self.songs_model)
+        self.songs_view.setItemDelegate(AlbumArtDelegate(self.songs_view))
+        self.songs_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.songs_view.setUniformItemSizes(True)
+        self.songs_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.songs_view.customContextMenuRequested.connect(self.on_songs_context_menu)
+        self.songs_view.doubleClicked.connect(lambda idx: self.start_selected_song())
+
+        # Header: station chooser + transport + volume.
+        self.stations_button = QToolButton()
+        self.stations_button.setText(_('Choose Station'))
+        self.stations_button.setPopupMode(QToolButton.InstantPopup)
+        self.stations_button.clicked.connect(self.toggle_stations_popover)
+
+        self.stations_popover = StationsPopover(self)
+        self.stations_popover.station_selected.connect(self.station_changed)
+
+        self.playpause_button = QPushButton()
+        self.playpause_button.setIcon(self._pause_icon())
+        self.playpause_button.setToolTip(_('Play/Pause'))
+        self.playpause_button.clicked.connect(self.user_playpause)
+
+        self.skip_button = QPushButton()
+        self.skip_button.setIcon(self._skip_icon())
+        self.skip_button.setToolTip(_('Skip'))
+        self.skip_button.clicked.connect(self.next_song)
+
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setMinimum(0)
+        self.volume_slider.setMaximum(100)
+        self.volume_slider.setFixedWidth(120)
+        self.volume_slider.setValue(int(self.settings['volume'] * 100))
+        self.volume_slider.valueChanged.connect(self.on_volume_slider_changed)
+
+        self.menu_button = QToolButton()
+        menu_icon = self._icon('open-menu', 'application-menu')
+        if menu_icon.isNull():
+            self.menu_button.setText('☰')  # trigram / hamburger fallback
+        else:
+            self.menu_button.setIcon(menu_icon)
+        self.menu_button.setPopupMode(QToolButton.InstantPopup)
+        self.menu_button.setMenu(self._build_main_menu())
+
+        header = QHBoxLayout()
+        header.addWidget(self.stations_button)
+        header.addWidget(self.playpause_button)
+        header.addWidget(self.skip_button)
+        header.addStretch(1)
+        header.addWidget(self.volume_slider)
+        header.addWidget(self.menu_button)
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addLayout(header)
+        layout.addWidget(self.songs_view)
+        self.setCentralWidget(central)
+
+        self.setStatusBar(QStatusBar())
+        self.resize(500, 550)
+
+        # Apply the persisted volume to the player.
+        self.set_player_volume(self.settings['volume'])
+
+    def _icon(self, *names):
+        for name in names:
+            icon = QIcon.fromTheme(name)
+            if not icon.isNull():
+                return icon
+        return QIcon()
+
+    def _themed_or_standard(self, theme_name, standard_pixmap):
+        """Themed icon if present, otherwise Qt's built-in style icon (always
+        available, so transport buttons are never blank on minimal themes)."""
+        icon = QIcon.fromTheme(theme_name)
+        if not icon.isNull():
+            return icon
+        return self.style().standardIcon(standard_pixmap)
+
+    def _pause_icon(self):
+        return self._themed_or_standard('media-playback-pause', QStyle.SP_MediaPause)
+
+    def _play_icon(self):
+        return self._themed_or_standard('media-playback-start', QStyle.SP_MediaPlay)
+
+    def _skip_icon(self):
+        return self._themed_or_standard('media-skip-forward', QStyle.SP_MediaSkipForward)
+
+    def _build_main_menu(self):
+        menu = QMenu(self)
+        menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
+        menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
+        menu.addSeparator()
+        menu.addAction(_('Help'), lambda: self.open_url('https://github.com/pithos/pithos/wiki'))
+        menu.addAction(_('About'), self.show_about)
+        menu.addSeparator()
+        menu.addAction(_('Quit'), self.close, QKeySequence('Ctrl+Q'))
+        return menu
+
+    def init_actions(self):
+        def shortcut(seq, slot):
+            act = QAction(self)
+            act.setShortcut(QKeySequence(seq))
+            act.triggered.connect(slot)
+            self.addAction(act)
+            return act
+
+        shortcut('Space', self.user_playpause)
+        shortcut('Return', self.start_selected_song)
+        shortcut('Ctrl+I', self.info_song)
+        shortcut('Ctrl+Up', self.volume_up)
+        shortcut('Ctrl+Down', self.volume_down)
+        shortcut('Ctrl+Right', self.next_song)
+        shortcut('Ctrl+L', self.love_song)
+        shortcut('Ctrl+B', self.ban_song)
+        shortcut('Ctrl+T', self.tired_song)
+        shortcut('Ctrl+U', self.unrate_song)
+        shortcut('Ctrl+D', self.bookmark_song)
+        shortcut('Ctrl+R', self.toggle_stations_popover)
+
+    # ------------------------------------------------------------- status bar
+    def status_push(self, context, message):
+        self._status_messages[context] = message
+        self.statusBar().showMessage(message)
+
+    def status_pop(self, context):
+        self._status_messages.pop(context, None)
+        if self._status_messages:
+            self.statusBar().showMessage(next(reversed(self._status_messages.values())))
+        else:
+            self.statusBar().clearMessage()
+
+    # -------------------------------------------------------------- keyring
+    def on_keyring_unlocked(self, error):
+        if error:
+            logging.error('You need to install a service such as gnome-keyring. Error: {}'.format(error))
+            self.fatal_error_dialog(
+                getattr(error, 'message', str(error)),
+                _('You need to install a service such as gnome-keyring.'),
+            )
+        else:
+            self.pandora_connect()
+
+    # --------------------------------------------------------------- worker
+    def worker_run(self, fn, args=(), callback=None, message=None, context='net',
+                   errorback=None, user_data=None):
+        if context and message:
+            self.status_push(context, message)
+
+        if isinstance(fn, str):
+            fn = getattr(self.pandora, fn)
+
+        def cb(v):
+            if context:
+                self.status_pop(context)
+            if callback:
+                if user_data is not None:
+                    callback(v, user_data)
+                else:
+                    callback(v)
+
+        def eb(e):
+            if context and message:
+                self.status_pop(context)
+
+            def retry_cb():
+                self.auto_retrying_auth = False
+                if fn is not self.pandora.connect:
+                    self.worker_run(fn, args, callback, message, context)
+
+            if isinstance(e, PandoraAuthTokenInvalid) and not self.auto_retrying_auth:
+                self.auto_retrying_auth = True
+                logging.info("Automatic reconnect after invalid auth token")
+                self.pandora_connect(message="Reconnecting...", callback=retry_cb)
+            elif isinstance(e, PandoraAPIVersionError):
+                self.api_update_dialog()
+            elif isinstance(e, PandoraError):
+                self.error_dialog(e.message, retry_cb, submsg=e.submsg)
+            else:
+                logging.warning(getattr(e, 'traceback', e))
+
+        self.worker.send(fn, args, cb, errorback or eb)
+
+    # ---------------------------------------------------------------- proxy
+    def get_proxy(self):
+        proxy = self.settings['proxy']
+        if proxy:
+            return proxy
+        system_proxies = urllib.request.getproxies()
+        return system_proxies.get('http')
+
+    def set_proxy(self, *ignore, reconnect=True):
+        from .pandora import pandora
+
+        handlers = []
+        global_proxy = self.settings['proxy']
+        if global_proxy:
+            handlers.append(urllib.request.ProxyHandler(
+                {'http': global_proxy, 'https': global_proxy}))
+        global_opener = pandora.Pandora.build_opener(*handlers)
+        urllib.request.install_opener(global_opener)
+
+        control_opener = global_opener
+        control_proxy = self.settings['control-proxy']
+        control_proxy_pac = self.settings['control-proxy-pac']
+
+        if not control_proxy and (control_proxy_pac and pacparser):
+            pacparser.init()
+            with urllib.request.urlopen(control_proxy_pac) as f:
+                pacstring = f.read().decode('utf-8')
+                try:
+                    pacparser.parse_pac_string(pacstring)
+                except pacparser._pacparser.error:
+                    logging.warning('Failed to parse PAC.')
+            try:
+                proxies = pacparser.find_proxy("http://pandora.com", "pandora.com").split(";")
+                for proxy in proxies:
+                    match = re.search("PROXY (.*)", proxy)
+                    if match:
+                        control_proxy = match.group(1)
+                        break
+            except pacparser._pacparser.error:
+                logging.warning('Failed to find proxy via PAC.')
+            pacparser.cleanup()
+        elif not control_proxy and (control_proxy_pac and not pacparser):
+            logging.warning("Disabled proxy auto-config support because python-pacparser module was not found.")
+
+        if control_proxy:
+            control_opener = pandora.Pandora.build_opener(
+                urllib.request.ProxyHandler({'http': control_proxy, 'https': control_proxy}))
+
+        self.pandora.set_url_opener(control_opener)
+        if reconnect:
+            self.pandora_connect()
+
+    def set_audio_quality(self, *ignore):
+        self.pandora.set_audio_quality(self.settings['audio-quality'])
+
+    # ------------------------------------------------------------- pandora
+    def pandora_connect(self, *ignore, message="Logging in...", callback=None):
+        def cb(password):
+            if not password:
+                self.show_preferences()
+            else:
+                self._pandora_connect_real(message, callback, email, password)
+
+        email = self.settings['email']
+        if not email:
+            self.show_preferences()
+        else:
+            SecretService.get_account_password(email, cb)
+
+    def _pandora_connect_real(self, message, callback, email, password):
+        if self.settings['pandora-one']:
+            client = client_keys[default_one_client_id]
+        else:
+            client = client_keys[default_client_id]
+
+        force_client = self.settings['force-client']
+        if force_client in client_keys:
+            client = client_keys[force_client]
+        elif force_client and force_client[0] == '{':
+            try:
+                client = json.loads(force_client)
+            except json.JSONDecodeError:
+                logging.error("Could not parse force_client json")
+
+        args = (client, email, password)
+
+        def on_got_stations(*ignore):
+            self.process_stations()
+            if callback:
+                callback()
+
+        def pandora_ready(*ignore):
+            logging.info("Pandora connected")
+            if self.settings['pandora-one'] != self.pandora.isSubscriber:
+                self.settings['pandora-one'] = self.pandora.isSubscriber
+                self._pandora_connect_real(message, callback, email, password)
+            else:
+                self.worker_run('get_stations', (), on_got_stations, 'Getting stations...', 'login')
+
+        self.worker_run('connect', args, pandora_ready, message, 'login')
+
+    def pandora_reconnect(self, email_password):
+        email, password = email_password
+        self.stop()
+        self.waiting_for_playlist = False
+        self.current_song_index = None
+        self.start_new_playlist = False
+        self.current_station = None
+        self.current_station_id = None
+        self.have_stations = False
+        self.playcount = 0
+        self.songs_model.clear()
+        self._pandora_connect_real("Logging in...", None, email, password)
+
+    # ---------------------------------------------- explicit content filter
+    def on_explicit_content_filter_checkbox(self, *ignore):
+        if not self.pandora.connected:
+            return
+        current_checkbox_state = self.prefs_dlg.explicit_filter_checked()
+
+        def set_content_filter(current_state):
+            self.pandora.set_explicit_content_filter(current_state)
+
+        def get_new_playlist(*ignore):
+            if current_checkbox_state:
+                logging.info('Getting a new playlist.')
+                self.waiting_for_playlist = False
+                self.stop()
+                self.current_song_index = None
+                self.songs_model.clear()
+                self.get_playlist(start=True)
+
+        if self.filter_state is not None and self.filter_state != current_checkbox_state:
+            self.worker_run(set_content_filter, (current_checkbox_state,), get_new_playlist)
+
+    def sync_explicit_content_filter_setting(self, *ignore):
+        self.prefs_dlg.set_filter_unknown()
+        self.filter_state = None
+        if not self.pandora.connected:
+            return
+
+        def get_state(*ignore):
+            return self.pandora.explicit_content_filter_state
+
+        def sync_checkbox(current_state):
+            self.filter_state, pin_protected = current_state[0], current_state[1]
+            self.prefs_dlg.set_filter_state(self.filter_state, pin_protected)
+
+        self.worker_run(get_state, (), sync_checkbox)
+
+    # -------------------------------------------------------------- stations
+    def station_rows(self):
+        return self.stations_model
+
+    def process_stations(self, *ignore):
+        self.stations_model = []
+        self.current_station = None
+        selected = None
+        for i, s in enumerate(self.pandora.stations):
+            if s.isThumbprint:
+                self.pandora.stations.insert(1, self.pandora.stations.pop(i))
+                break
+        for i, s in enumerate(self.pandora.stations):
+            if s.isQuickMix and s.isCreator:
+                self.stations_model.append([s, "QuickMix", i])
+            else:
+                self.stations_model.append([s, s.name, i])
+            if s.id == self.current_station_id:
+                logging.info("Restoring saved station: id = %s" % (s.id))
+                selected = s
+        if not selected and self.stations_model:
+            selected = self.stations_model[0][0]
+
+        self._refresh_stations_popover()
+
+        if selected:
+            self.station_changed(selected, reconnecting=self.have_stations)
+            self.have_stations = True
+            self.stations_processed.emit(self.pandora.stations)
+        else:
+            self.show_stations()
+
+    def _refresh_stations_popover(self):
+        self.stations_popover.set_rows(
+            (row[0], row[1], row[2]) for row in self.stations_model)
+        if self.current_station:
+            self.stations_popover.select_station(self.current_station)
+
+    def toggle_stations_popover(self, *ignore):
+        self.stations_popover.toggle_visibility(self.stations_button)
+
+    def station_changed(self, station, reconnecting=False):
+        if station is self.current_station:
+            return
+        self.waiting_for_playlist = False
+        if not reconnecting:
+            self.stop()
+            self.current_song_index = None
+            self.songs_model.clear()
+        logging.info("Selecting station %s; total = %i" % (station.id, len(self.stations_model)))
+        self.current_station_id = station.id
+        self.current_station = station
+        self.settings.set_string('last-station-id', self.current_station_id)
+        if not reconnecting:
+            self.get_playlist(start=True)
+        self.stations_button.setText(station.name)
+        self.stations_popover.select_station(station)
+        self.station_changed_sig.emit(station)
+
+    def on_station_renamed(self, station, new_name):
+        for row in self.stations_model:
+            if row[0] is station:
+                row[1] = new_name
+                break
+        self._refresh_stations_popover()
+        if station is self.current_station:
+            self.stations_button.setText(new_name)
+        self.station_renamed_sig.emit((station.id, new_name))
+
+    def on_station_added(self, station, user_data, source=None):
+        music_type, description = user_data
+        for row in self.stations_model:
+            if row[0].id == station.id:
+                self.station_already_exists(row[0], description, music_type)
+                return
+        self.pandora.stations.append(station)
+        self.stations_model.insert(0, [station, station.name, 0])
+        self._refresh_stations_popover()
+        self.station_added_sig.emit(station)
+        self.station_changed(station)
+        if source is not None and hasattr(source, 'reload'):
+            source.reload()
+
+    def station_already_exists(self, station, description, music_type):
+        sub_title = _('Pandora does not permit multiple stations with the same seed.')
+        if music_type == 'song':
+            seed = _('Song Seed:')
+        elif music_type == 'artist':
+            seed = _('Artist Seed:')
+        else:
+            seed = _('Genre Seed:')
+
+        if station is self.current_station:
+            QMessageBox.information(
+                self, _('A New Station could not be created'),
+                _('{0}\n"{1}", the Station you are currently listening to already '
+                  'contains the {2} {3}.').format(sub_title, station.name, seed, description))
+        else:
+            reply = QMessageBox.question(
+                self, _('A New Station could not be created'),
+                _('{0}\nYour Station "{1}" already contains the {2} {3}.\n'
+                  'Would you like to listen to it now?').format(
+                    sub_title, station.name, seed, description))
+            if reply == QMessageBox.Yes:
+                self.station_changed(station)
+
+    def remove_station(self, station):
+        self.stations_model = [row for row in self.stations_model if row[0] is not station]
+        self._refresh_stations_popover()
+        self.station_removed_sig.emit(station)
+
+    def refresh_stations(self, *ignore):
+        self.worker_run(self.pandora.get_stations, (), self.process_stations,
+                        "Refreshing stations...")
+
+    # --------------------------------------------------------------- current
+    @property
+    def current_song(self):
+        if self.current_song_index is not None:
+            return self.songs_model.song_at(self.current_song_index)
+
+    def start_song(self, song_index):
+        songs_remaining = len(self.songs_model) - song_index
+        if songs_remaining <= 0:
+            return self.get_playlist(start=True)
+        elif songs_remaining == 1:
+            self.get_playlist()
+
+        prev = self.current_song
+        self.stop()
+        self.current_song_index = song_index
+        if prev:
+            self.update_song_row(prev)
+
+        if not self.current_song.is_still_valid():
+            self.current_song.message = 'Song expired'
+            self.update_song_row()
+            return self.next_song()
+
+        if self.current_song.tired or self.current_song.rating == RATE_BAN:
+            return self.next_song()
+
+        logging.info("Starting song: index = %i" % (song_index))
+        song = self.current_song
+        audioUrl = song.audioUrl
+        os.environ['PULSE_PROP_media.title'] = song.title
+        os.environ['PULSE_PROP_media.artist'] = song.artist
+        os.environ['PULSE_PROP_media.name'] = '{}: {}'.format(song.artist, song.title)
+        os.environ['PULSE_PROP_media.filename'] = audioUrl
+        self.player.set_property('buffer-size', int(song.bitrate) * 375)
+        self.player.set_property('connection-speed', int(song.bitrate))
+        self.player.set_property("uri", audioUrl)
+        self._set_player_state(PseudoGst.BUFFERING)
+        self.playcount += 1
+
+        self.current_song.start_time = time.time()
+        idx = self.songs_model.index(song_index)
+        self.songs_view.scrollTo(idx, QAbstractItemView.PositionAtBottom)
+        self.songs_view.setCurrentIndex(idx)
+        self.setWindowTitle("%s by %s - Pyrrha" % (song.title, song.artist))
+        self.update_song_row()
+        self.song_changed.emit(song)
+        self.metadata_changed.emit(song)
+
+    def next_song(self, *ignore):
+        if self.current_song_index is not None:
+            self.start_song(self.current_song_index + 1)
+
+    # --------------------------------------------------------- state machine
+    def _set_player_state(self, target, change_gst_state=False):
+        change_gst_state = change_gst_state or self._current_state is not PseudoGst.BUFFERING
+        if change_gst_state:
+            ret = self.player.set_state(target.state)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                logging.warning('Error changing player state from: {} to: {}'.format(
+                    self._current_state, target))
+                return False
+            self._current_state = target
+            if self._current_state is PseudoGst.PLAYING:
+                self.create_ui_loop()
+            else:
+                self.destroy_ui_loop()
+        if target is not PseudoGst.BUFFERING:
+            self._buffer_recovery_state = target
+        self.update_song_row()
+        return True
+
+    def user_play(self, *ignore):
+        if self.play():
+            self.user_changed_play_state.emit(True)
+
+    def play(self, change_gst_state=False):
+        if self.current_song is None:
+            return False
+        if not self.current_song.is_still_valid():
+            self.current_song.message = 'Song expired'
+            self.update_song_row()
+            return self.next_song()
+        if self._set_player_state(PseudoGst.PLAYING, change_gst_state=change_gst_state):
+            self.playpause_button.setIcon(self._pause_icon())
+            self.play_state_changed.emit(True)
+        return True
+
+    def user_pause(self, *ignore):
+        self.pause()
+        self.user_changed_play_state.emit(False)
+
+    def pause(self):
+        if self._set_player_state(PseudoGst.PAUSED):
+            self.playpause_button.setIcon(self._play_icon())
+            self.play_state_changed.emit(False)
+
+    def stop(self):
+        prev = self.current_song
+        if prev and getattr(prev, 'start_time', None):
+            prev.finished = True
+            prev.position = self.query_position()
+            self.song_ended.emit(prev)
+        if self._set_player_state(PseudoGst.STOPPED, change_gst_state=True):
+            self.playpause_button.setIcon(self._pause_icon())
+
+    def user_playpause(self, *ignore):
+        if self.playing:
+            self.user_pause()
+        else:
+            self.user_play()
+
+    def playpause(self, *ignore):
+        # Plain toggle without the user_* semantics (used by MPRIS PlayPause).
+        if self.playing:
+            self.pause()
+        else:
+            self.play()
+
+    def playpause_notify(self, *ignore):
+        # Toggle as if the user pressed play/pause (used by media keys).
+        self.user_playpause()
+
+    def bring_to_top(self, *ignore):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def quit(self, *ignore):
+        # An explicit quit (tray menu, MPRIS) bypasses close interceptors.
+        self.stop()
+        self.app.quit()
+
+    # ------------------------------------------------------------- playlist
+    def clear_art_cache(self):
+        timestamp = time.time()
+        with os.scandir(self.tempdir) as art_list:
+            for art in art_list:
+                age = timestamp - art.stat().st_mtime
+                if age > ART_CACHE_TIME:
+                    os.remove(os.path.join(self.tempdir, art.path))
+
+    def get_playlist(self, start=False):
+        if self.playlist_update_timer_id:
+            GLib.source_remove(self.playlist_update_timer_id)
+        self.playlist_update_timer_id = 0
+        songs_left_to_process = 0
+        song_count = 0
+        self.start_new_playlist = self.start_new_playlist or start
+        if self.waiting_for_playlist:
+            return
+
+        if self.gstreamer_errorcount_1 >= self.playcount and self.gstreamer_errorcount_2 >= 1:
+            logging.warning("Too many gstreamer errors. Not retrying")
+            self.waiting_for_playlist = 1
+            self.error_dialog(self.gstreamer_error, self.get_playlist)
+            return
+
+        def emit_songs_added(song_count):
+            self.playlist_update_timer_id = 0
+            self.songs_added.emit(song_count)
+            return False
+
+        def get_album_art(url, tmpdir, *extra):
+            try:
+                with urllib.request.urlopen(url) as f:
+                    image = f.read()
+            except urllib.error.HTTPError:
+                logging.warning('Invalid image url received')
+                return (None, None,) + extra
+
+            file_url = None
+            song, index = extra
+            if tmpdir:
+                try:
+                    self.clear_art_cache()
+                    filename_hash = hashlib.sha256(
+                        (song.artist + song.album).encode('utf-8')).hexdigest() + '.jpeg'
+                    cache_file_path = os.path.join(self.tempdir, filename_hash)
+                    file_url = urllib.parse.urljoin('file://', urllib.parse.quote(cache_file_path))
+                    if not os.path.exists(cache_file_path):
+                        with open(cache_file_path, 'xb') as f:
+                            f.write(image)
+                except IOError:
+                    logging.warning("Failed to write art tempfile")
+            return (image, file_url,) + extra
+
+        def art_callback(t):
+            nonlocal songs_left_to_process
+            image, file_url, song, index = t
+            songs_left_to_process -= 1
+            if index < len(self.songs_model) and self.songs_model.song_at(index) is song:
+                pixmap = None
+                if image is not None:
+                    img = QImage.fromData(image)
+                    if not img.isNull():
+                        pixmap = QPixmap.fromImage(img.scaled(
+                            ALBUM_ART_SIZE, ALBUM_ART_SIZE,
+                            Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+                song.art_pixbuf = pixmap
+                self.songs_model.update_row(index, pixmap=pixmap)
+                self.update_song_row(song)
+                if file_url:
+                    song.artUrl = file_url
+                    if song is self.current_song or not self.playlist_update_timer_id:
+                        self.metadata_changed.emit(song)
+                if not songs_left_to_process and self.playlist_update_timer_id:
+                    GLib.source_remove(self.playlist_update_timer_id)
+                    emit_songs_added(song_count)
+
+        def callback(songs):
+            nonlocal songs_left_to_process, song_count
+            songs_left_to_process = song_count = len(songs)
+            start_index = len(self.songs_model)
+            for i in songs:
+                i.index = len(self.songs_model)
+                i.art_pixbuf = None
+                self.songs_model.append_song(i)
+                self.update_song_row(i)
+                if i.artRadio:
+                    self.worker_run(get_album_art, (i.artRadio, self.tempdir, i, i.index),
+                                    art_callback)
+                else:
+                    songs_left_to_process -= 1
+            self.playlist_update_timer_id = GLib.timeout_add_seconds(
+                song_count, emit_songs_added, song_count)
+
+            self.status_pop('net')
+            if self.start_new_playlist:
+                self.start_song(start_index)
+
+            self.gstreamer_errorcount_2 = self.gstreamer_errorcount_1
+            self.gstreamer_errorcount_1 = 0
+            self.playcount = 0
+            self.waiting_for_playlist = False
+            self.start_new_playlist = False
+
+        self.waiting_for_playlist = True
+        self.worker_run(self.current_station.get_playlist, (), callback, "Getting songs...")
+
+    # ------------------------------------------------------------- gst bus
+    def query_position(self):
+        if self.player.query(self._query_position):
+            return self._query_position.parse_position()[1]
+
+    def query_duration(self):
+        if self.player.query(self._query_duration):
+            return self._query_duration.parse_duration()[1]
+
+    def query_buffer(self):
+        if self.player.query(self._query_buffer):
+            return self._query_buffer.parse_buffering_percent()[0]
+        return True
+
+    def on_gst_stream_start(self, bus, message):
+        if self.current_song is None:
+            return
+        self.current_song.duration = self.query_duration() or self.current_song.trackLength * Gst.SECOND
+        self.current_song.duration_message = self.format_time(self.current_song.duration)
+        self.update_song_row()
+        if self.current_song.get_duration_sec() != self.current_song.trackLength:
+            self.metadata_changed.emit(self.current_song)
+
+    def on_gst_eos(self, bus, message):
+        logging.info("EOS")
+        self.next_song()
+
+    def on_gst_plugin_installed(self, result, userdata):
+        if result == GstPbutils.InstallPluginsReturn.SUCCESS:
+            self.fatal_error_dialog(
+                _("Codec installation successful"),
+                _("The required codec was installed, please restart Pyrrha."))
+        else:
+            self.error_dialog(
+                _("Codec installation failed"), None,
+                submsg=_("The required codec failed to install. Either manually install "
+                         "it or try another quality setting."))
+
+    def on_gst_element(self, bus, message):
+        if GstPbutils.is_missing_plugin_message(message):
+            if GstPbutils.install_plugins_supported():
+                details = GstPbutils.missing_plugin_message_get_installer_detail(message)
+                GstPbutils.install_plugins_async([details], None, self.on_gst_plugin_installed, None)
+            else:
+                self.error_dialog(
+                    _("Missing codec"), None,
+                    submsg=_("GStreamer is missing a plugin and it could not be automatically "
+                             "installed. Either manually install it or try another quality setting."))
+
+    def on_gst_error(self, bus, message):
+        err, debug = message.parse_error()
+        logging.error("Gstreamer error: %s, %s, %s" % (err, debug, err.code))
+        if self.current_song:
+            self.current_song.message = "Error: " + str(err)
+            self.update_song_row()
+        self.gstreamer_error = str(err)
+        self.gstreamer_errorcount_1 += 1
+        if not GstPbutils.install_plugins_installation_in_progress():
+            self.next_song()
+
+    def on_gst_buffering(self, bus, message):
+        self.react_to_buffering_message(False)
+        if self.buffering_timer_id:
+            GLib.source_remove(self.buffering_timer_id)
+            self.buffering_timer_id = 0
+        self.buffering_timer_id = GLib.timeout_add(200, self.react_to_buffering_message, True)
+
+    def react_to_buffering_message(self, from_timeout):
+        if from_timeout:
+            self.buffering_timer_id = 0
+        buffering = self.query_buffer()
+
+        if buffering and self._current_state is not PseudoGst.BUFFERING:
+            logging.debug("Buffer underrun")
+            self._set_player_state(PseudoGst.BUFFERING)
+        elif not buffering and self._current_state is PseudoGst.BUFFERING:
+            logging.debug("Buffer overrun")
+            if self._buffer_recovery_state is PseudoGst.STOPPED:
+                self.play(change_gst_state=True)
+            elif self._buffer_recovery_state is PseudoGst.PLAYING:
+                self._set_player_state(PseudoGst.PLAYING, change_gst_state=True)
+            elif self._buffer_recovery_state is PseudoGst.PAUSED:
+                self._set_player_state(PseudoGst.PAUSED, change_gst_state=True)
+            self.buffering_finished.emit(self.query_position() or 0)
+        return buffering
+
+    def on_gst_volume(self, player, volumespec):
+        vol = self.player.get_property('volume')
+        GLib.idle_add(self.set_volume_cb, vol)
+
+    def set_volume_cb(self, volume):
+        scaled_volume = math.pow(volume, 1.0 / 3.0)
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(int(round(scaled_volume * 100)))
+        self.volume_slider.blockSignals(False)
+
+    def on_gst_source(self, player, params):
+        soup = player.props.source.props
+        proxy = self.get_proxy()
+        if proxy and hasattr(soup, 'proxy'):
+            scheme, user, password, hostport = parse_proxy(proxy)
+            soup.proxy = hostport
+            soup.proxy_id = user
+            soup.proxy_pw = password
+
+    # ------------------------------------------------------------- row text
+    def song_text(self, song):
+        title = html.escape(song.title)
+        artist = html.escape(song.artist)
+        album = html.escape(song.album)
+        msg = []
+        if song is self.current_song:
+            song.position = self.query_position()
+            if song.bitrate is not None:
+                msg.append("%skbit/s" % (song.bitrate))
+            if song.position is not None and getattr(song, 'duration', None) is not None:
+                pos_str = self.format_time(song.position)
+                msg.append("%s / %s" % (pos_str, song.duration_message))
+                if self.playing is False:
+                    msg.append("Paused")
+            if self._current_state is PseudoGst.BUFFERING:
+                msg.append("Buffering…")
+        if song.message:
+            msg.append(song.message)
+        status = " - ".join(msg) or " "
+
+        if song.is_ad:
+            description = ('<span style="font-size:large; font-weight:bold">'
+                          'Commercial Advertisement</span><br>'
+                          '<span style="font-weight:bold">Pandora</span>')
+        else:
+            description = (
+                '<span style="font-size:large; font-weight:bold">%s</span><br>'
+                'by <span style="font-weight:bold">%s</span><br>'
+                '<span style="font-size:small">from <i>%s</i></span>'
+                % (title, artist, album))
+        return '%s<br><span style="font-size:small">%s</span>' % (
+            description, html.escape(status))
+
+    @staticmethod
+    def song_icon(song):
+        if song.tired:
+            return 'tired'
+        if song.rating == RATE_LOVE:
+            return 'love'
+        if song.rating == RATE_BAN:
+            return 'ban'
+        return None
+
+    def update_song_row(self, song=None):
+        if song is None:
+            song = self.current_song
+        if song is not None and song.index is not None:
+            self.songs_model.update_row(
+                song.index, html=self.song_text(song), icon=self.song_icon(song))
+        return True
+
+    def create_ui_loop(self):
+        if not self.ui_loop_timer_id:
+            self.ui_loop_timer_id = GLib.timeout_add_seconds(1, self.update_song_row)
+
+    def destroy_ui_loop(self):
+        if self.ui_loop_timer_id:
+            GLib.source_remove(self.ui_loop_timer_id)
+            self.ui_loop_timer_id = 0
+
+    @staticmethod
+    def format_time(time_int):
+        if time_int is None:
+            return None
+        time_int //= 1000000000
+        s = time_int % 60
+        time_int //= 60
+        m = time_int % 60
+        time_int //= 60
+        h = time_int
+        if h:
+            return "%i:%02i:%02i" % (h, m, s)
+        return "%i:%02i" % (m, s)
+
+    # ------------------------------------------------------------- selection
+    def selected_song(self):
+        idx = self.songs_view.currentIndex()
+        if idx.isValid():
+            return idx.data(SongRole)
+
+    def start_selected_song(self, *ignore):
+        song = self.selected_song()
+        if song is None or self.current_song_index is None:
+            return False
+        playable = song.index > self.current_song_index
+        if playable:
+            self.start_song(song.index)
+        return playable
+
+    # --------------------------------------------------------------- ratings
+    def _rate_callback(self, song):
+        def callback(l):
+            self.update_song_row(song)
+            self.metadata_changed.emit(song)
+        return callback
+
+    def love_song(self, *ignore, song=None):
+        song = song or self.current_song
+        if song:
+            self.worker_run(song.rate, (RATE_LOVE,), self._rate_callback(song), "Loving song...")
+
+    def ban_song(self, *ignore, song=None):
+        song = song or self.current_song
+        if not song:
+            return
+        self.worker_run(song.rate, (RATE_BAN,), self._rate_callback(song), "Banning song...")
+        if song is self.current_song:
+            self.next_song()
+
+    def unrate_song(self, *ignore, song=None):
+        song = song or self.current_song
+        if song:
+            self.worker_run(song.rate, (RATE_NONE,), self._rate_callback(song),
+                            "Removing song rating...")
+
+    def tired_song(self, *ignore, song=None):
+        song = song or self.current_song
+        if not song:
+            return
+        self.worker_run(song.set_tired, (), self._rate_callback(song), "Putting song on shelf...")
+        if song is self.current_song:
+            self.next_song()
+
+    def bookmark_song(self, *ignore, song=None):
+        song = song or self.current_song
+        if song:
+            self.worker_run(song.bookmark, (), None, "Bookmarking...")
+
+    def bookmark_song_artist(self, *ignore, song=None):
+        song = song or self.current_song
+        if song:
+            self.worker_run(song.bookmark_artist, (), None, "Bookmarking...")
+
+    def info_song(self, *ignore, song=None):
+        song = song or self.current_song
+        if song:
+            self.open_url(song.songDetailURL)
+
+    def create_artist_station(self, song):
+        user_data = ('artist', html.escape(song.artist))
+        self.worker_run('add_station_by_track_token', (song.trackToken, 'artist'),
+                        self.on_station_added, user_data=user_data)
+
+    def create_song_station(self, song):
+        user_data = ('song', '{} by {}'.format(html.escape(song.title), html.escape(song.artist)))
+        self.worker_run('add_station_by_track_token', (song.trackToken, 'song'),
+                        self.on_station_added, user_data=user_data)
+
+    # -------------------------------------------------------- context menu
+    def on_songs_context_menu(self, pos):
+        idx = self.songs_view.indexAt(pos)
+        if not idx.isValid():
+            return
+        self.songs_view.setCurrentIndex(idx)
+        song = self.selected_song()
+        if song is None:
+            return
+        menu = QMenu(self)
+        if song.rating != RATE_LOVE:
+            menu.addAction(_('Love'), lambda: self.love_song(song=song))
+        else:
+            menu.addAction(_('Unlove'), lambda: self.unrate_song(song=song))
+        if song.rating != RATE_BAN:
+            menu.addAction(_('Ban'), lambda: self.ban_song(song=song))
+        else:
+            menu.addAction(_('Unban'), lambda: self.unrate_song(song=song))
+        menu.addAction(_('Tired (shelve for a month)'), lambda: self.tired_song(song=song))
+        menu.addSeparator()
+        menu.addAction(_('Create Station from Artist'), lambda: self.create_artist_station(song))
+        menu.addAction(_('Create Station from Song'), lambda: self.create_song_station(song))
+        menu.addSeparator()
+        menu.addAction(_('Bookmark Song'), lambda: self.bookmark_song(song=song))
+        menu.addAction(_('Bookmark Artist'), lambda: self.bookmark_song_artist(song=song))
+        menu.addAction(_('Song Information'), lambda: self.info_song(song=song))
+        menu.exec(self.songs_view.viewport().mapToGlobal(pos))
+
+    # --------------------------------------------------------------- volume
+    def set_player_volume(self, value):
+        self.player.set_property("volume", math.pow(value, 3))
+
+    def on_volume_slider_changed(self, value):
+        v = value / 100.0
+        self.set_player_volume(v)
+        self.settings.set_double('volume', v)
+
+    def adjust_volume(self, amount):
+        self.volume_slider.setValue(self.volume_slider.value() + amount)
+
+    def volume_up(self, *ignore):
+        self.adjust_volume(+2)
+
+    def volume_down(self, *ignore):
+        self.adjust_volume(-2)
+
+    # --------------------------------------------------------------- dialogs
+    def open_url(self, url):
+        logging.info("Opening URL {}".format(url))
+        QDesktopServices.openUrl(QUrl(url))
+
+    def error_dialog(self, message, retry_cb, submsg=None):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setText(message or '')
+        if submsg:
+            box.setInformativeText(submsg)
+        box.addButton(_('Preferences'), QMessageBox.ActionRole)
+        retry_btn = None
+        if retry_cb is not None:
+            retry_btn = box.addButton(_('Retry'), QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if retry_btn is not None and clicked is retry_btn:
+            self.gstreamer_errorcount_2 = 0
+            logging.info("Manual retry")
+            retry_cb()
+        elif clicked is not None and box.buttonRole(clicked) == QMessageBox.ActionRole:
+            self.show_preferences()
+
+    def fatal_error_dialog(self, message, submsg):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setText(message or '')
+        if submsg:
+            box.setInformativeText(submsg)
+        box.exec()
+        self.app.quit()
+
+    def api_update_dialog(self):
+        reply = QMessageBox.warning(
+            self, _('Pyrrha'),
+            _('Pyrrha is out of date and can no longer connect to Pandora. '
+              'Please update Pyrrha.'),
+            QMessageBox.Ok | QMessageBox.Cancel)
+        if reply == QMessageBox.Ok:
+            self.open_url("http://pithos.github.io/itbroke")
+        self.app.quit()
+
+    def on_prefs_finished(self, result):
+        if not self.settings['email']:
+            self.close()
+
+    def show_about(self):
+        AboutDialog(__version__, self).exec()
+
+    def show_preferences(self):
+        self.sync_explicit_content_filter_setting()
+        self.prefs_dlg.load()
+        self.prefs_dlg.show()
+
+    def show_stations(self):
+        if self.stations_dlg is not None:
+            self.stations_dlg.raise_()
+            self.stations_dlg.activateWindow()
+        else:
+            self.stations_dlg = StationsDialog(self, self)
+            self.stations_dlg.finished.connect(self._on_stations_dlg_closed)
+            self.stations_dlg.show()
+
+    def _on_stations_dlg_closed(self, *ignore):
+        self.stations_dlg = None
+
+    # --------------------------------------------------------------- close
+    def closeEvent(self, event):
+        # Plugins (e.g. the tray icon) may intercept the close to hide the
+        # window instead of quitting. An interceptor returns True to do so.
+        for interceptor in self.close_interceptors:
+            try:
+                if interceptor():
+                    event.ignore()
+                    self.hide()
+                    return
+            except Exception:
+                logging.exception('close interceptor failed')
+        self.stop()
+        super().closeEvent(event)
+        self.app.quit()

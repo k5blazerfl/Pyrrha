@@ -1,0 +1,4 @@
+#!/bin/sh
+# Launch Pyrrha using the project virtualenv (which has PySide6 + system gi).
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/.venv-qt/bin/python" -m pyrrha "$@"

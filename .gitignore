@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Project virtualenv (created via install; not tracked)
+.venv-qt/
+
+# The upstream Pithos tree Pyrrha was ported from (its backend is vendored into
+# pyrrha/pandora and pyrrha/dbus_util; the full tree is not part of this repo).
+pithos-master/
+
+# Agent/session artifacts and scratch output
+.claude/
+scratch_*.png
