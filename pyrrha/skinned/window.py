@@ -57,8 +57,8 @@ MINUS_POS = (36, 26)                # leading "-" shown in remaining-time mode
 TIME_RECT = QRect(36, 24, 66, 16)   # click to toggle elapsed <-> remaining
 STATUS_POS = (26, 28)               # play/pause/stop indicator
 VIS = QRect(24, 48, 76, 15)         # spectrum-analyzer visualization area
-POSBAR = QRect(16, 72, 248, 10)     # song-progress bar (non-interactive)
-POSBAR_THUMB_W = 29                 # posbar.bmp: bg (0,0,248,10), thumb (248,0,29,10)
+POSBAR = QRect(16, 72, 248, 10)     # song-progress bar (non-interactive); stretches
+POSBAR_RIGHT_MARGIN = W - (POSBAR.x() + POSBAR.width())   # native gap to the right edge (11)
 KBPS_POS = (111, 43)                 # bitrate number (small font, before "kbps")
 KHZ_POS = (156, 43)                  # sample-rate number (before "kHz")
 STEREO_POS = (239, 41)              # from monoster.bmp: (0,0) lit / (0,12) dim
@@ -327,17 +327,20 @@ class SkinnedWindow(QWidget):
         p.restore()
 
     def _paint_position(self, p):
+        # Stretch the bar to the window width, keeping the native right margin.
+        x, y, h = POSBAR.x(), POSBAR.y(), POSBAR.height()
+        bar_w = max(1, self._lw() - x - POSBAR_RIGHT_MARGIN)
         # Groove background from the skin, then a blue (accent) progress fill.
-        p.drawImage(POSBAR.x(), POSBAR.y(), self.skin.sprite('posbar.bmp', 0, 0, 248, 10))
+        p.drawImage(QRect(x, y, bar_w, h), self.skin.sprite('posbar.bmp', 0, 0, 248, 10))
         pos = self.ctl.query_position()
         dur = self.ctl.query_duration()
         if not (pos and dur and dur > 0):
             return
         frac = min(1.0, max(0.0, pos / dur))
-        fill_w = int(frac * (POSBAR.width() - 2))
+        fill_w = int(frac * (bar_w - 2))
         if fill_w <= 0:
             return
-        r = QRect(POSBAR.x() + 1, POSBAR.y() + 2, fill_w, POSBAR.height() - 4)
+        r = QRect(x + 1, y + 2, fill_w, h - 4)
         p.fillRect(r, self._accent)
         p.fillRect(QRect(r.right() - 1, r.y(), 2, r.height()), self._peak_color)  # bright cap
 
@@ -445,10 +448,22 @@ class SkinnedWindow(QWidget):
 
     def _set_volume_from_x(self, x):
         frac = (x - VOLUME.x()) / max(1, VOLUME.width() - VOL_HANDLE_W)
+        self._set_volume(frac)
+
+    def _set_volume(self, frac):
         self._volume = min(1.0, max(0.0, frac))
         self.ctl.set_player_volume(self._volume)
         self.ctl.settings.set_double('volume', self._volume)
         self.update()
+
+    def change_volume(self, delta):
+        self._set_volume(self._volume + delta)
+
+    def contextMenuEvent(self, event):
+        self._show_menu(event.globalPos())   # right-click anywhere -> main menu
+
+    def wheelEvent(self, event):
+        self.window().wheelEvent(event)      # scroll -> volume (handled by the shell)
 
     def _activate(self, name):
         c = self.ctl
@@ -621,6 +636,13 @@ class SkinnedShell(QWidget):
         self.relayout()
         self.ctl.set_last_skin(path)
         return True
+
+    def wheelEvent(self, event):
+        # Scroll anywhere over the window to change volume (classic Winamp).
+        notches = event.angleDelta().y() / 120.0
+        if notches and self.main is not None:
+            self.main.change_volume(notches / 27.0)   # one 28-step slider notch
+            event.accept()
 
     def toggle_width(self):
         """Widen the player to reveal the album art beside the EQ (a square),

@@ -74,9 +74,14 @@ class SkinnedEqWindow(QWidget):
         self._collapsed = False
         self._closed = False
 
-        # Repaint the album art when the song or its artwork changes.
+        # Repaint the album art when the song or its artwork changes. The model's
+        # dataChanged is the reliable trigger: art_callback always updates the row
+        # (metadata_changed is skipped when the art cache write fails).
         controller.song_changed.connect(lambda *_: self.update())
         controller.metadata_changed.connect(lambda *_: self.update())
+        model = getattr(controller, 'songs_model', None)
+        if model is not None and hasattr(model, 'dataChanged'):
+            model.dataChanged.connect(self._on_rows_changed)
         # Restore each station's remembered EQ when it becomes active.
         controller.station_changed_sig.connect(self._on_station_changed)
 
@@ -158,6 +163,12 @@ class SkinnedEqWindow(QWidget):
         sid = getattr(self.ctl, 'current_station_id', None)
         if sid is not None:
             self.ctl.set_station_eq(sid, self._bands, self._preamp)
+
+    def _on_rows_changed(self, top_left, bottom_right, *roles):
+        # Repaint if the current song's row changed (e.g. its art just arrived).
+        cur = getattr(self.ctl, 'current_song_index', None)
+        if cur is not None and top_left.row() <= cur <= bottom_right.row():
+            self.update()
 
     def _on_station_changed(self, station):
         sid = getattr(station, 'id', None)
@@ -280,6 +291,12 @@ class SkinnedEqWindow(QWidget):
             handle = self.window().windowHandle()
             if handle is not None:
                 handle.startSystemMove()
+
+    def contextMenuEvent(self, event):
+        self._show_presets_menu(event.globalPos())   # right-click -> presets
+
+    def wheelEvent(self, event):
+        self.window().wheelEvent(event)               # scroll -> volume
 
     def mouseMoveEvent(self, event):
         if self._drag is not None:

@@ -22,7 +22,7 @@ import re
 
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 W, H = 275, 200                  # default logical size
 TITLE_H = 20
@@ -230,6 +230,35 @@ class SkinnedPlaylistWindow(QWidget):
             if handle is not None:
                 handle.startSystemMove()
 
+    def contextMenuEvent(self, event):
+        if self._collapsed:
+            return
+        s = self._scale()
+        ly = int(event.pos().y() / s)
+        if ly < TITLE_H:
+            return
+        idx = self._song_index_at(ly)
+        songs = self._rows()
+        if idx is None or not (0 <= idx < len(songs)) or songs[idx] is None:
+            return
+        song = songs[idx]
+        c = self.ctl
+        icon = c.song_icon(song)
+        menu = QMenu(self)
+        if icon == 'love':
+            menu.addAction(_('Unlove'), lambda: c.unrate_song(song=song))
+        else:
+            menu.addAction(_('Love'), lambda: c.love_song(song=song))
+        if icon == 'ban':
+            menu.addAction(_('Unban'), lambda: c.unrate_song(song=song))
+        else:
+            menu.addAction(_('Ban'), lambda: c.ban_song(song=song))
+        menu.addAction(_('Tired (shelve for a month)'), lambda: c.tired_song(song=song))
+        menu.addSeparator()
+        menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
+        menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+        menu.exec(event.globalPos())
+
     def mouseMoveEvent(self, event):
         if self._resizing:
             # Drag the corner: vertical only — resize the playlist's height.
@@ -242,3 +271,6 @@ class SkinnedPlaylistWindow(QWidget):
 
     def mouseReleaseEvent(self, event):
         self._resizing = False
+
+    def wheelEvent(self, event):
+        self.window().wheelEvent(event)   # scroll -> volume
