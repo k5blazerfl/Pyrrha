@@ -15,7 +15,7 @@ against a real skin.
 import logging
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
 
 from .eqwindow import SkinnedEqWindow
@@ -51,14 +51,19 @@ EQ_TOGGLE = QRect(219, 58, 23, 12)
 PL_TOGGLE = QRect(242, 58, 23, 12)
 VOLUME = QRect(107, 57, 68, 13)     # slider background area
 VOL_HANDLE_W = 14
-TITLE_AREA = QRect(111, 24, 154, CHAR_H)   # song-title marquee
+TITLE_AREA = QRect(111, 27, 154, CHAR_H)   # song-title marquee (centered in the display box)
 TIME_POS = [(48, 26), (60, 26), (78, 26), (90, 26)]  # MM:SS digit slots
 MINUS_POS = (36, 26)                # leading "-" shown in remaining-time mode
 TIME_RECT = QRect(36, 24, 66, 16)   # click to toggle elapsed <-> remaining
 STATUS_POS = (26, 28)               # play/pause/stop indicator
-VIS = QRect(24, 48, 76, 15)         # spectrum-analyzer visualization area
+# Clutterbar: the classic O/A/I/D/V strip Winamp draws on the display's left
+# edge (the skin doesn't supply it). Each letter is a tiny clickable button.
+CLUTTER_X = 10
+CLUTTER = [('O', 22), ('A', 30), ('I', 38), ('D', 46), ('V', 54)]
+VIS = QRect(22, 45, 78, 16)         # spectrum-analyzer visualization area (x=22, baseline y=60)
 POSBAR = QRect(16, 72, 248, 10)     # song-progress bar (non-interactive); stretches
 POSBAR_RIGHT_MARGIN = W - (POSBAR.x() + POSBAR.width())   # native gap to the right edge (11)
+POSBAR_THUMB_W = 29                 # posbar.bmp: bg (0,0,248,10), thumb (248,0,29,10)
 KBPS_POS = (111, 43)                 # bitrate number (small font, before "kbps")
 KHZ_POS = (156, 43)                  # sample-rate number (before "kHz")
 STEREO_POS = (239, 41)              # from monoster.bmp: (0,0) lit / (0,12) dim
@@ -270,6 +275,10 @@ class SkinnedWindow(QWidget):
         p.drawImage(STATUS_POS[0], STATUS_POS[1],
                     self.skin.sprite('playpaus.bmp', self._status_sprite_x(), 0, 9, 9))
 
+        # Clutterbar (classic Winamp O/A/I/D/V strip on the display's left edge).
+        if getattr(self.window(), 'mode', 'modern') == 'classic':
+            self._paint_clutterbar(p)
+
         # Time (MM SS) (left-anchored); a leading "-" marks remaining time.
         tstr, remaining = self._time_display()
         for (x, y), ch in zip(TIME_POS, tstr):
@@ -330,19 +339,109 @@ class SkinnedWindow(QWidget):
         # Stretch the bar to the window width, keeping the native right margin.
         x, y, h = POSBAR.x(), POSBAR.y(), POSBAR.height()
         bar_w = max(1, self._lw() - x - POSBAR_RIGHT_MARGIN)
-        # Groove background from the skin, then a blue (accent) progress fill.
         p.drawImage(QRect(x, y, bar_w, h), self.skin.sprite('posbar.bmp', 0, 0, 248, 10))
         pos = self.ctl.query_position()
         dur = self.ctl.query_duration()
         if not (pos and dur and dur > 0):
             return
         frac = min(1.0, max(0.0, pos / dur))
-        fill_w = int(frac * (bar_w - 2))
-        if fill_w <= 0:
-            return
-        r = QRect(x + 1, y + 2, fill_w, h - 4)
-        p.fillRect(r, self._accent)
-        p.fillRect(QRect(r.right() - 1, r.y(), 2, r.height()), self._peak_color)  # bright cap
+        if getattr(self.window(), 'mode', 'modern') == 'classic':
+            # Authentic Winamp slider knob from the skin.
+            tx = x + int(frac * (bar_w - POSBAR_THUMB_W))
+            p.drawImage(tx, y, self.skin.sprite('posbar.bmp', 248, 0, POSBAR_THUMB_W, h))
+        else:
+            # Modern: a blue (accent) progress fill with a bright leading cap.
+            fill_w = int(frac * (bar_w - 2))
+            if fill_w <= 0:
+                return
+            r = QRect(x + 1, y + 2, fill_w, h - 4)
+            p.fillRect(r, self._accent)
+            p.fillRect(QRect(r.right() - 1, r.y(), 2, r.height()), self._peak_color)
+
+    def _paint_clutterbar(self, p):
+        f = QFont()
+        f.setPixelSize(6)
+        f.setBold(True)
+        p.setFont(f)
+        shell = self.window()
+        active = {'A': getattr(shell, 'keep_above', False),
+                  'D': getattr(shell, 'scale', 1) > 1}
+        for label, y in CLUTTER:
+            p.setPen(QColor(210, 212, 220) if active.get(label) else QColor(96, 98, 108))
+            p.drawText(QRect(CLUTTER_X, y, 7, 8), Qt.AlignCenter, label)
+
+    def _clutter_action(self, label, gpos):
+        c, shell = self.ctl, self.window()
+        if label == 'O':                       # Options
+            self._show_menu(gpos)
+        elif label == 'A':                     # Always on top (KWin "keep above")
+            shell.keep_above = not shell.keep_above
+            if not self._kwin_keep_above(shell.keep_above):
+                shell.setWindowFlag(Qt.WindowStaysOnTopHint, shell.keep_above)
+                shell.show()                   # fallback: Qt hint + re-map
+            self.update()
+        elif label == 'I' and hasattr(c, 'info_song'):   # song Info
+            c.info_song()
+        elif label == 'D':                     # Size: cycle 1x -> 1.5x -> 2x
+            cur = getattr(shell, 'scale', 1.0)
+            shell.set_scale(1.5 if cur < 1.25 else 2.0 if cur < 1.75 else 1.0)
+        elif label == 'V':                     # Visualization mode
+            self._vis_mode = (self._vis_mode + 1) % 4
+            self.update()
+
+    def _kwin_keep_above(self, above):
+        """Set the window's keep-above state through KWin's D-Bus scripting
+        interface (works on Wayland where the Qt hint is ignored). Returns True
+        on success. Matches our window by app-id or caption."""
+        import os
+        import tempfile
+        try:
+            from gi.repository import Gio, GLib
+        except Exception:
+            return False
+        js = ('(function(){\n'
+              '  var l=(typeof workspace.windowList==="function")?workspace.windowList()\n'
+              '        :(typeof workspace.clientList==="function")?workspace.clientList():[];\n'
+              '  for(var i=0;i<l.length;i++){var c=l[i];\n'
+              '    var rc=((c.resourceClass!=null)?c.resourceClass:"").toString().toLowerCase();\n'
+              '    var cap=((c.caption!=null)?c.caption:"").toString();\n'
+              '    if(rc.indexOf("pyrrha")!==-1||cap.indexOf("Pyrrha")!==-1){c.keepAbove=%s;}\n'
+              '  }})();\n') % ('true' if above else 'false')
+        fd, path = tempfile.mkstemp(suffix='.js', prefix='pyrrha-ka-')
+        with os.fdopen(fd, 'w') as f:
+            f.write(js)
+        name = os.path.basename(path)
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            sid = None
+            for sig, args in (('(ss)', (path, name)), ('(s)', (path,))):
+                try:
+                    r = bus.call_sync('org.kde.KWin', '/Scripting', 'org.kde.kwin.Scripting',
+                                      'loadScript', GLib.Variant(sig, args),
+                                      GLib.VariantType('(i)'), Gio.DBusCallFlags.NONE, 2000, None)
+                    sid = r.unpack()[0]
+                    break
+                except GLib.Error:
+                    continue
+            if sid is None or sid < 0:
+                return False
+            bus.call_sync('org.kde.KWin', '/Scripting/Script%d' % sid, 'org.kde.kwin.Script',
+                          'run', None, None, Gio.DBusCallFlags.NONE, 2000, None)
+            try:
+                bus.call_sync('org.kde.KWin', '/Scripting', 'org.kde.kwin.Scripting',
+                              'unloadScript', GLib.Variant('(s)', (name,)),
+                              None, Gio.DBusCallFlags.NONE, 2000, None)
+            except GLib.Error:
+                pass
+            return True
+        except GLib.Error as e:
+            logging.debug('KWin keep-above via D-Bus failed: %s', e)
+            return False
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     def _paint_stream_info(self, p):
         bitrate, rate, channels = self.ctl.audio_stream_info()
@@ -418,6 +517,11 @@ class SkinnedWindow(QWidget):
             self._vis_mode = (self._vis_mode + 1) % 4
             self.update()
             return
+        if getattr(self.window(), 'mode', 'modern') == 'classic':
+            for label, cy in CLUTTER:      # clutterbar buttons
+                if QRect(CLUTTER_X, cy, 8, 8).contains(pos):
+                    self._clutter_action(label, event.globalPosition().toPoint())
+                    return
         name = self._button_at(pos)
         if name:
             self._pressed = name
@@ -595,6 +699,7 @@ class SkinnedShell(QWidget):
         # 'modern': album-art widen + unified resize; 'classic': faithful Winamp
         # (main/EQ pinned native, playlist independently resizable).
         self.mode = controller.get_skin_mode() if hasattr(controller, 'get_skin_mode') else 'modern'
+        self.keep_above = False   # clutterbar "A" (KWin keep-above)
         self.setWindowTitle('Pyrrha')
         # Fills any area not covered by a panel (e.g. to the right of the
         # fixed-width main/EQ when the playlist is dragged wider).

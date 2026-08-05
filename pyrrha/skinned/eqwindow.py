@@ -16,7 +16,7 @@ EQMAIN spec and are easy to tune against a real skin.
 """
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QMenu, QWidget
 
 W, H = 275, 116
@@ -24,18 +24,28 @@ BANDS = 10
 
 TITLE_H = 14
 THUMB_W, THUMB_H = 11, 11
-SLIDER_TOP = 38
-SLIDER_TRAVEL = 51          # vertical thumb travel (px)
+# Thumb-top range so the 11px thumb centers on the skin's +12/0/-12 dB track
+# guides (base 2.91 has them at y=39/68/98).
+SLIDER_TOP = 34
+SLIDER_TRAVEL = 59          # vertical thumb travel (px)
 PREAMP_X = 21
 BAND_X0, BAND_DX = 78, 18   # band columns: 78, 96, ... 240 (spread out when wider)
 GRAPH = QRect(86, 17, 113, 19)
 ON_BTN = QRect(14, 18, 25, 12)
-PRESETS_BTN = QRect(214, 18, 50, 12)   # opens the preset menu
+PRESETS_BTN = QRect(217, 18, 44, 12)   # opens the preset menu; sprite at (224,164)
 MIN_BTN = QRect(254, 3, 9, 9)     # windowshade: collapse to the title bar
 CLOSE_BTN = QRect(264, 3, 9, 9)   # close (hide) the panel
 
 DB_RANGE = 12.0             # slider maps +/- this many dB (middle = 0)
 DB_MIN, DB_MAX = -24.0, 12.0  # element's actual limits
+
+# Slider well: the colored VU bar behind each thumb. 28 frames (2 rows of 14)
+# in eqmain.bmp; magenta (255,0,255) is the transparency key. Skins without
+# wells (e.g. Glare) leave this region magenta, so nothing is drawn.
+WELL_W, WELL_H = 14, 63
+WELL_TOP = 34
+WELL_FRAMES = 28
+MAGENTA = 0xFF00FF
 
 # Classic 10-band EQ presets (dB per band, low → high frequency).
 PRESETS = [
@@ -73,6 +83,8 @@ class SkinnedEqWindow(QWidget):
         self._drag = None   # index of slider being dragged (-1 = preamp)
         self._collapsed = False
         self._closed = False
+        self._well_cache = {}       # frame index -> magenta-keyed QImage
+        self._wells_present = None   # does this skin have slider wells?
 
         # Repaint the album art when the song or its artwork changes. The model's
         # dataChanged is the reliable trigger: art_callback always updates the row
@@ -87,7 +99,40 @@ class SkinnedEqWindow(QWidget):
 
     def set_skin(self, skin):
         self.skin = skin
+        self._well_cache = {}
+        self._wells_present = None
         self.update()
+
+    # ----------------------------------------------------------- slider wells
+    def _has_wells(self):
+        if self._wells_present is None:
+            img = self.skin.image('eqmain.bmp')
+            present = False
+            if not img.isNull() and img.height() >= WELL_TOP + WELL_H:
+                for fx in (17, 152, 212):     # a few well centers
+                    c = img.pixelColor(fx, 190)
+                    if max(c.red(), c.green(), c.blue()) - min(c.red(), c.green(), c.blue()) > 50:
+                        present = True
+                        break
+            self._wells_present = present
+        return self._wells_present
+
+    def _well_sprite(self, frame):
+        img = self._well_cache.get(frame)
+        if img is None:
+            col, row = frame % 14, frame // 14
+            img = self.skin.sprite('eqmain.bmp', 13 + col * 15, 164 + row * 65,
+                                   WELL_W, WELL_H).convertToFormat(QImage.Format_ARGB32)
+            for y in range(img.height()):        # key out magenta transparency
+                for x in range(img.width()):
+                    if (img.pixel(x, y) & 0xFFFFFF) == MAGENTA:
+                        img.setPixelColor(x, y, QColor(0, 0, 0, 0))
+            self._well_cache[frame] = img
+        return img
+
+    def _band_frame(self, db):
+        f = int(round((db + DB_RANGE) / (2 * DB_RANGE) * (WELL_FRAMES - 1)))
+        return max(0, min(WELL_FRAMES - 1, f))
 
     def _scale(self):
         return getattr(self.window(), 'scale', 1)
@@ -221,8 +266,19 @@ class SkinnedEqWindow(QWidget):
         p.drawImage(ON_BTN.x(), ON_BTN.y(),
                     self.skin.sprite('eqmain.bmp', sx, sy, ON_BTN.width(), ON_BTN.height()))
 
+        # Presets button (a sprite in most skins; some also bake it into the bg).
+        p.drawImage(PRESETS_BTN.x(), PRESETS_BTN.y(),
+                    self.skin.sprite('eqmain.bmp', 224, 164, PRESETS_BTN.width(), PRESETS_BTN.height()))
+
         # Response-curve graph.
         self._paint_curve(p)
+
+        # Slider wells (the colored VU bar behind each thumb), if the skin has them.
+        if self._has_wells():
+            p.drawImage(self._col_x(-1) - 2, WELL_TOP, self._well_sprite(self._band_frame(self._preamp)))
+            for i in range(BANDS):
+                p.drawImage(self._col_x(i) - 2, WELL_TOP,
+                            self._well_sprite(self._band_frame(self._bands[i])))
 
         # Sliders (preamp + 10 bands).
         thumb = self.skin.sprite('eqmain.bmp', 0, 176 if self._drag is not None else 164,
