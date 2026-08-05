@@ -35,7 +35,7 @@ class AboutDialog(QDialog):
             _('A Qt port of Pithos — a native Pandora Radio client.') +
             '<br>' + _('Version') + ' ' + version +
             '<br><br>' + _('Pyrrha is not affiliated with or endorsed by Pandora Media, Inc.') +
-            '<br><a href="https://pithos.github.io">pithos.github.io</a>'
+            '<br><a href="https://github.com/k5blazerfl/Pyrrha">github.com/k5blazerfl/Pyrrha</a>'
         )
         body.setAlignment(Qt.AlignCenter)
         body.setOpenExternalLinks(True)

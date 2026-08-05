@@ -519,25 +519,40 @@ class SkinnedWindow(QWidget):
         menu.addAction(_('Ban'), lambda: c.ban_song())
         menu.addAction(_('Tired'), lambda: c.tired_song())
         menu.addSeparator()
-        size = menu.addMenu(_('Size'))
-        cur = getattr(self.window(), 'scale', 1)
-        for label, sc in ((_('Normal (1x)'), 1.0), (_('1.5x'), 1.5), (_('Double (2x)'), 2.0)):
-            a = size.addAction(label, lambda *args, v=sc: self.window().set_scale(v))
-            a.setCheckable(True)
-            a.setChecked(abs(cur - sc) < 0.01)
-        skin_menu = menu.addMenu(_('Skin'))
-        skin_menu.addAction(_('Load Skin File…'), self._load_skin_file)
-        skin_menu.addAction(_('Load Skin Folder…'), self._load_skin_folder)
-        available = c.available_skins()
-        if available:
-            skin_menu.addSeparator()
-            current = getattr(self.window(), 'skin', None)
-            current_path = getattr(current, 'path', None)
-            for name, path in available:
-                a = skin_menu.addAction(name, lambda *args, p=path: self.window().load_skin(p))
+        # Size (uniform scale) is a Classic-mode concern; Modern resizes by
+        # widening for the album art instead.
+        if getattr(self.window(), 'mode', 'modern') == 'classic':
+            size = menu.addMenu(_('Size'))
+            cur = getattr(self.window(), 'scale', 1)
+            for label, sc in ((_('Normal (1x)'), 1.0), (_('1.5x'), 1.5), (_('Double (2x)'), 2.0)):
+                a = size.addAction(label, lambda *args, v=sc: self.window().set_scale(v))
                 a.setCheckable(True)
-                a.setChecked(path == current_path)
-        menu.addAction(_('Standard Window'), c.show_standard_view)
+                a.setChecked(abs(cur - sc) < 0.01)
+        # Skin loading is a Classic-mode concern (Modern is the enhanced view of
+        # whatever skin is loaded).
+        if getattr(self.window(), 'mode', 'modern') == 'classic':
+            skin_menu = menu.addMenu(_('Skin'))
+            skin_menu.addAction(_('Load Skin File…'), self._load_skin_file)
+            skin_menu.addAction(_('Load Skin Folder…'), self._load_skin_folder)
+            available = c.available_skins()
+            if available:
+                skin_menu.addSeparator()
+                current_path = getattr(getattr(self.window(), 'skin', None), 'path', None)
+                for name, path in available:
+                    a = skin_menu.addAction(name, lambda *args, p=path: self.window().load_skin(p))
+                    a.setCheckable(True)
+                    a.setChecked(path == current_path)
+        mode_menu = menu.addMenu(_('Mode'))
+        shell = self.window()
+        cur_mode = getattr(shell, 'mode', 'modern')
+        cm = mode_menu.addAction(_('Classic Skins'), lambda: shell.set_mode('classic'))
+        cm.setCheckable(True)
+        cm.setChecked(cur_mode == 'classic')
+        mm = mode_menu.addAction(_('Modern Skin'), lambda: shell.set_mode('modern'))
+        mm.setCheckable(True)
+        mm.setChecked(cur_mode == 'modern')
+        mode_menu.addSeparator()
+        mode_menu.addAction(_('Standard'), c.show_standard_view)
         menu.addSeparator()
         menu.addAction(_('Quit'), c.quit)
         menu.exec(global_pos)
@@ -546,7 +561,10 @@ class SkinnedWindow(QWidget):
         return getattr(self.window(), 'scale', 1)
 
     def _lw(self):
-        return max(W, int(getattr(self.window(), 'content_w', W)))
+        shell = self.window()
+        if getattr(shell, 'mode', 'modern') == 'classic':
+            return W                       # pinned native in classic mode
+        return max(W, int(getattr(shell, 'content_w', W)))
 
     def _dx(self):
         return self._lw() - W
@@ -574,6 +592,9 @@ class SkinnedShell(QWidget):
         self.skin = skin        # current skin (swappable at runtime)
         self.scale = scale      # UI scale factor (1, 1.5, 2, …)
         self.content_w = W      # shared logical content width (all panels stretch to it)
+        # 'modern': album-art widen + unified resize; 'classic': faithful Winamp
+        # (main/EQ pinned native, playlist independently resizable).
+        self.mode = controller.get_skin_mode() if hasattr(controller, 'get_skin_mode') else 'modern'
         self.setWindowTitle('Pyrrha')
         # Fills any area not covered by a panel (e.g. to the right of the
         # fixed-width main/EQ when the playlist is dragged wider).
@@ -588,12 +609,28 @@ class SkinnedShell(QWidget):
         self.relayout()
 
     def _max_content_w(self):
+        # Classic mode never widens main/EQ (they stay native, 275px).
+        if self.mode == 'classic':
+            return W
         # When the EQ is present, the space to its right shows the album art;
         # cap the width so that area is at most a square (its height is the EQ
         # height, H), which bounds how far the window can be dragged.
         if self.eq is not None and not self.eq._closed:
             return W + H
         return WMAX
+
+    def set_mode(self, mode):
+        """Switch between 'classic' (faithful) and 'modern' (album-art) skins."""
+        if mode not in ('classic', 'modern') or mode == self.mode:
+            return
+        self.mode = mode
+        self.content_w = W
+        if mode == 'modern':
+            self.scale = 1.0     # Size is Classic-only; Modern runs at 1x
+        if hasattr(self.ctl, 'set_skin_mode'):
+            self.ctl.set_skin_mode(mode)
+        self.relayout()
+        self._repaint_panels()
 
     def relayout(self):
         panels = [p for p in (self.main, self.eq, self.pl)
@@ -646,8 +683,8 @@ class SkinnedShell(QWidget):
 
     def toggle_width(self):
         """Widen the player to reveal the album art beside the EQ (a square),
-        or collapse back to native width. Only meaningful with the EQ open."""
-        if self.eq is None or self.eq._closed:
+        or collapse back to native width. Modern mode, EQ open."""
+        if self.mode == 'classic' or self.eq is None or self.eq._closed:
             return
         self.set_content_width(W if self.content_w > W else W + H)
 

@@ -29,8 +29,7 @@ TITLE_H = 20
 ROW_H = 12
 LIST_TOP = TITLE_H + 2
 GRIP = 14                        # resize-corner hit/indicator size (bottom-right)
-WMIN, WMAX = 275, 1600
-HMIN, HMAX = TITLE_H + 3 * ROW_H, 1400
+HMIN, HMAX = TITLE_H + 3 * ROW_H, 1400   # the playlist resizes vertically only
 
 DEFAULTS = {
     'normal': '#00FF00', 'current': '#FFFFFF',
@@ -65,7 +64,7 @@ class SkinnedPlaylistWindow(QWidget):
         self._collapsed = False
         self._closed = False
         self._resizing = False
-        self._height = H          # logical height (resizable); width is shared on the shell
+        self._height = H          # logical height (resizable); width is never dragged
 
         controller.songs_added.connect(lambda *_: self.update())
         controller.song_changed.connect(lambda *_: self.update())
@@ -84,7 +83,10 @@ class SkinnedPlaylistWindow(QWidget):
         return getattr(self.window(), 'scale', 1)
 
     def _lw(self):
-        return max(W, int(getattr(self.window(), 'content_w', W)))
+        shell = self.window()
+        if getattr(shell, 'mode', 'modern') == 'classic':
+            return W                        # classic mode: fixed native width
+        return max(W, int(getattr(shell, 'content_w', W)))
 
     def _lh(self):
         return TITLE_H if self._collapsed else self._height
@@ -261,8 +263,8 @@ class SkinnedPlaylistWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._resizing:
-            # Drag the corner: vertical only — resize the playlist's height.
-            # (Double-click the grip to widen the whole player instead.)
+            # Drag the corner: vertical only. Classic mode stays native width;
+            # modern width is driven by the double-click album-art widen.
             s = self._scale()
             tl = self.mapToGlobal(QPoint(0, 0))
             gy = event.globalPosition().toPoint().y()

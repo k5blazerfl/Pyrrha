@@ -415,7 +415,7 @@ class PyrrhaWindow(QMainWindow):
         self._skin_action = menu.addAction(_('Winamp Skin'), self.show_skinned_view)
         self._skin_action.setVisible(False)   # shown once a skin is available
         menu.addSeparator()
-        menu.addAction(_('Help'), lambda: self.open_url('https://github.com/pithos/pithos/wiki'))
+        menu.addAction(_('Help'), lambda: self.open_url('https://github.com/k5blazerfl/Pyrrha'))
         menu.addAction(_('About'), self.show_about)
         menu.addSeparator()
         menu.addAction(_('Quit'), self.close, QKeySequence('Ctrl+Q'))
@@ -1179,6 +1179,26 @@ class PyrrhaWindow(QMainWindow):
                 out.append((os.path.splitext(name)[0], full))
         return out
 
+    def _skin_mode_file(self):
+        d = os.path.join(GLib.get_user_config_dir(), 'pyrrha')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'skin_mode.txt')
+
+    def get_skin_mode(self):
+        try:
+            with open(self._skin_mode_file()) as f:
+                mode = f.read().strip()
+            return mode if mode in ('classic', 'modern') else 'modern'
+        except IOError:
+            return 'modern'
+
+    def set_skin_mode(self, mode):
+        try:
+            with open(self._skin_mode_file(), 'w') as f:
+                f.write(mode)
+        except IOError:
+            logging.warning('Failed to save the skin mode')
+
     def on_gst_error(self, bus, message):
         err, debug = message.parse_error()
         logging.error("Gstreamer error: %s, %s, %s" % (err, debug, err.code))
@@ -1471,7 +1491,7 @@ class PyrrhaWindow(QMainWindow):
               'Please update Pyrrha.'),
             QMessageBox.Ok | QMessageBox.Cancel)
         if reply == QMessageBox.Ok:
-            self.open_url("http://pithos.github.io/itbroke")
+            self.open_url("https://github.com/k5blazerfl/Pyrrha")
         self.app.quit()
 
     def on_prefs_finished(self, result):

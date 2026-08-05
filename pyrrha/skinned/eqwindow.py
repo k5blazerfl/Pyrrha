@@ -93,7 +93,10 @@ class SkinnedEqWindow(QWidget):
         return getattr(self.window(), 'scale', 1)
 
     def _lw(self):
-        return max(W, int(getattr(self.window(), 'content_w', W)))
+        shell = self.window()
+        if getattr(shell, 'mode', 'modern') == 'classic':
+            return W                       # native in classic mode (no album art)
+        return max(W, int(getattr(shell, 'content_w', W)))
 
     def display_width(self):
         # The EQ face itself can't stretch (its sliders, graph box, labels and
