@@ -249,7 +249,8 @@ class PyrrhaWindow(QMainWindow):
         self.worker = Worker()
         self._status_messages = {}
         self._station_eq = self._load_station_eq()
-        self.skinned_shell = None    # set by __main__ when launched with --skin
+        self.skinned_shell = None     # set by __main__ when launched with --skin
+        self._skinned_active = False  # True while the skinned shell is the shown view
 
         try:
             tempdir_base = '/var/tmp'
@@ -360,11 +361,36 @@ class PyrrhaWindow(QMainWindow):
     def set_skinned_shell(self, shell):
         """Register the Winamp-skinned shell so the two views can toggle."""
         self.skinned_shell = shell
+        self._skinned_active = shell is not None
         if getattr(self, '_skin_action', None) is not None:
             self._skin_action.setVisible(shell is not None)
 
+    def active_view(self):
+        """The widget currently serving as the player (skinned shell or native)."""
+        if self.skinned_shell is not None and self._skinned_active:
+            return self.skinned_shell
+        return self
+
+    def present_player(self):
+        """Show and raise whichever view is the active player (used by the tray)."""
+        view = self.active_view()
+        if view is self:
+            self.bring_to_top()
+        else:
+            view.showNormal()
+            view.raise_()
+            view.activateWindow()
+
+    def hide_player(self):
+        self.active_view().hide()
+
+    def player_visible(self):
+        view = self.active_view()
+        return view.isVisible() and not view.isMinimized()
+
     def show_standard_view(self):
         """Switch from the skinned UI to the standard (native) window."""
+        self._skinned_active = False
         if self.skinned_shell is not None:
             self.skinned_shell.hide()
         self.show()
@@ -375,6 +401,7 @@ class PyrrhaWindow(QMainWindow):
         """Switch from the standard window to the skinned UI."""
         if self.skinned_shell is None:
             return
+        self._skinned_active = True
         self.hide()
         self.skinned_shell.show()
         self.skinned_shell.raise_()

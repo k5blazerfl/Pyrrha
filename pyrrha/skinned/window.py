@@ -14,7 +14,7 @@ against a real skin.
 
 import logging
 
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
 
@@ -672,6 +672,23 @@ class SkinnedShell(QWidget):
             if panel is self.pl:
                 self.content_w = W   # collapse the player back to default width
         self.relayout()
+
+    def _repaint_panels(self):
+        for panel in (self.main, self.eq, self.pl):
+            if panel is not None:
+                panel.update()
+
+    def showEvent(self, event):
+        # Restoring from the tray (hidden -> shown) must repaint the panels, or
+        # the album-art area can come back from a stale backing store.
+        super().showEvent(event)
+        self._repaint_panels()
+
+    def changeEvent(self, event):
+        # Same for un-minimizing (a window-state change, not a show event).
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange and not self.isMinimized():
+            self._repaint_panels()
 
     def closeEvent(self, event):
         self.ctl.quit()

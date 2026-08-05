@@ -21,7 +21,6 @@ The *Configure…* dialog switches between the full-colour and symbolic icons.
 
 import logging
 
-from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QLabel, QMenu, QSystemTrayIcon,
     QVBoxLayout,
@@ -39,11 +38,11 @@ DEFAULT_ICON = APP_ID
 
 
 def _resolve_icon(name):
-    for candidate in (name, APP_ID):
-        icon = QIcon.fromTheme(candidate)
-        if not icon.isNull():
-            return icon
-    # Robust fallback: the icon bundled inside the package.
+    # Return a pixmap-based icon (the bundled PNG), not a theme-*name* icon.
+    # The tray's StatusNotifierItem then carries the actual Pyrrha bitmap; if we
+    # handed it a themed QIcon, Qt would advertise only the icon *name* over
+    # D-Bus, which some desktops re-resolve to a stale icon (e.g. a leftover
+    # Pithos one from the theme).
     return app_icon()
 
 
@@ -56,7 +55,9 @@ class NotificationIconPlugin(PyrrhaPlugin):
             self.prepare_complete(error='No system tray is available.')
             return
 
-        if not self.settings['data']:
+        # Reset unknown values (empty, or a stale Pithos icon name carried over
+        # by the one-time config migration) to Pyrrha's own icon.
+        if self.settings['data'] not in {choice[0] for choice in ICON_CHOICES}:
             self.settings['data'] = DEFAULT_ICON
 
         self.tray = QSystemTrayIcon(self.window)
@@ -94,10 +95,11 @@ class NotificationIconPlugin(PyrrhaPlugin):
             self._toggle_window()
 
     def _toggle_window(self, *ignore):
-        if self.window.isVisible() and not self.window.isMinimized():
-            self.window.hide()
+        # Act on the active player view (the skinned shell when in skinned mode).
+        if self.window.player_visible():
+            self.window.hide_player()
         else:
-            self.window.bring_to_top()
+            self.window.present_player()
 
     # -- state updates -----------------------------------------------------
     def _play_state_changed(self, playing):
@@ -142,8 +144,8 @@ class NotificationIconPlugin(PyrrhaPlugin):
                     pass
         self._play_conn = self._song_conn = None
         # If the window was hidden to the tray, make sure it's visible again.
-        if not self.window.isVisible():
-            self.window.bring_to_top()
+        if not self.window.player_visible():
+            self.window.present_player()
 
 
 class TrayIconPrefsDialog(QDialog):
