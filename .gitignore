@@ -16,3 +16,6 @@ pithos-master/
 # Agent/session artifacts and scratch output
 .claude/
 scratch_*.png
+
+# Third-party test skins (downloaded, not part of the project)
+/themes/
