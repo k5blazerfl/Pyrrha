@@ -1,5 +1,7 @@
 # Pyrrha
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 A Qt (PySide6) Pandora Radio client — a port of [Pithos](https://pithos.github.io) from GTK to Qt.
 
 Pyrrha keeps Pithos' battle-tested internals (the Pandora API client, the
