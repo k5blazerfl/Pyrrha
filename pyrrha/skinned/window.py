@@ -348,14 +348,18 @@ class SkinnedWindow(QWidget):
         dx = gap            # right-anchored controls shift by this much
         rkeep = W - SPLIT   # width of the right slice, anchored to the right edge
 
-        # Background: fixed left slice, the skin's own pixels stretched across
-        # the gap (features on the main window run horizontally, so a 1px column
-        # tiles cleanly), then the fixed right slice anchored to the right.
-        p.drawImage(0, 0, self.skin.sprite('main.bmp', 0, 0, SPLIT, H))
+        # Background. At native width (classic mode is fixed-size + zoom only)
+        # blit main.bmp 1:1 so nothing is sliced. Only Modern's widen stretches
+        # it: a fixed left slice, the skin's own pixels tiled across the gap (a
+        # 1px column tiles cleanly since the face runs horizontally), then the
+        # fixed right slice anchored to the right edge.
         if gap:
+            p.drawImage(0, 0, self.skin.sprite('main.bmp', 0, 0, SPLIT, H))
             p.drawImage(QRect(SPLIT, 0, gap, H),
                         self.skin.sprite('main.bmp', SPLIT - 1, 0, 1, H))
-        p.drawImage(lw - rkeep, 0, self.skin.sprite('main.bmp', SPLIT, 0, rkeep, H))
+            p.drawImage(lw - rkeep, 0, self.skin.sprite('main.bmp', SPLIT, 0, rkeep, H))
+        else:
+            p.drawImage(0, 0, self.skin.sprite('main.bmp', 0, 0, W, H))
 
         # Title bar: tile the fill across the full width, keep the end corners
         # (which carry the menu/close/minimize glyphs), and re-center the title
@@ -431,9 +435,14 @@ class SkinnedWindow(QWidget):
         p.end()
 
     def _paint_titlebar(self, p, lw):
-        # Tile the fill across the full width, keep the end corners (menu/close/
-        # minimize glyphs), and re-center the title graphic.
         ty = 0 if self.isActiveWindow() else 15
+        # At native width, blit the whole title bar 1:1 so every glyph (menu,
+        # minimize, windowshade, close) lands at its skin position. Only Modern's
+        # widen needs the stretch: tile the fill, keep the end corners, and
+        # re-center the title graphic as the bar grows.
+        if lw == W:
+            p.drawImage(0, 0, self.skin.sprite('titlebar.bmp', 27, ty, W, 14))
+            return
         p.drawImage(QRect(0, 0, lw, 14),
                     self.skin.sprite('titlebar.bmp', 27 + TB_CORNER + 1, ty, 1, 14))
         p.drawImage(0, 0, self.skin.sprite('titlebar.bmp', 27, ty, TB_CORNER, 14))
