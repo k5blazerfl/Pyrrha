@@ -940,6 +940,43 @@ class PyrrhaWindow(QMainWindow):
         song.art_pixbuf = pixmap
         self.songs_model.update_row(song.index, pixmap=pixmap)
 
+    def switch_to_local(self):
+        """Enter Local Playback mode with an empty playlist; the user then opens
+        files/folders. No-op if already in local mode."""
+        if self.local_mode:
+            return
+        self.local_mode = True
+        self.stop()
+        self.current_station = None
+        self.current_song_index = None
+        self.songs_model.clear()
+        self.stations_button.setText(_('Local Playback'))
+        self.setWindowTitle('Pyrrha')
+
+    def switch_to_pandora(self):
+        """Leave Local Playback and return to the last Pandora station."""
+        if not self.local_mode:
+            return
+        self.local_mode = False
+        self.stop()
+        self.current_song_index = None
+        self.songs_model.clear()
+        station = self._find_station(self.current_station_id)
+        if station is None and self.stations_model:
+            station = self.stations_model[0][0]
+        if station is not None:
+            self.station_changed(station)   # current_station is None, so this runs
+        else:
+            self.show_stations()
+
+    def _find_station(self, station_id):
+        if station_id is None:
+            return None
+        for row in self.stations_model:
+            if row[0].id == station_id:
+                return row[0]
+        return None
+
     # --------------------------------------------------------- state machine
     def _set_player_state(self, target, change_gst_state=False):
         change_gst_state = change_gst_state or self._current_state is not PseudoGst.BUFFERING

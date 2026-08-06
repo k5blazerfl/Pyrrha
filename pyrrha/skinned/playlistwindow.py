@@ -71,8 +71,15 @@ class SkinnedPlaylistWindow(QWidget):
         self._resizing = False
         self._height = H          # logical height (resizable); width is never dragged
 
-        controller.songs_added.connect(lambda *_: self.update())
         controller.song_changed.connect(lambda *_: self.update())
+        # Repaint on any model change — additions (songs_added covers the
+        # asynchronous Pandora fill) and, crucially, clears/resets (e.g.
+        # switching to Local Playback empties the list).
+        controller.songs_added.connect(lambda *_: self.update())
+        model = controller.songs_model
+        model.rowsInserted.connect(lambda *_: self.update())
+        model.rowsRemoved.connect(lambda *_: self.update())
+        model.modelReset.connect(lambda *_: self.update())
 
     def set_skin(self, skin):
         self.skin = skin

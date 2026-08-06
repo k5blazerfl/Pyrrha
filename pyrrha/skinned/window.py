@@ -649,20 +649,28 @@ class SkinnedWindow(QWidget):
     def _show_menu(self, global_pos):
         c = self.ctl
         menu = QMenu(self)
-        stations = menu.addMenu(_('Stations'))
-        self._populate_stations(stations)
-        stations.addSeparator()
-        stations.addAction(_('Manage Stations…'), c.show_stations)
-        menu.addSeparator()
-        menu.addAction(_('Open Files…'), c.open_local_files)
-        menu.addAction(_('Open Folder…'), c.open_local_folder)
+        # Source toggle: Pandora vs Local Playback. Open Files/Folder are only
+        # offered in local mode; Stations only in Pandora mode.
+        if c.local_mode:
+            menu.addAction(_('Switch to Pandora'), c.switch_to_pandora)
+            menu.addSeparator()
+            menu.addAction(_('Open Files…'), c.open_local_files)
+            menu.addAction(_('Open Folder…'), c.open_local_folder)
+        else:
+            menu.addAction(_('Switch to Local Playback'), c.switch_to_local)
+            menu.addSeparator()
+            stations = menu.addMenu(_('Stations'))
+            self._populate_stations(stations)
+            stations.addSeparator()
+            stations.addAction(_('Manage Stations…'), c.show_stations)
         menu.addSeparator()
         menu.addAction(_('Preferences…'), c.show_preferences)
         menu.addAction(_('About Pyrrha'), c.show_about)
-        menu.addSeparator()
-        menu.addAction(_('Love'), lambda: c.love_song())
-        menu.addAction(_('Ban'), lambda: c.ban_song())
-        menu.addAction(_('Tired'), lambda: c.tired_song())
+        if not c.local_mode:
+            menu.addSeparator()
+            menu.addAction(_('Love'), lambda: c.love_song())
+            menu.addAction(_('Ban'), lambda: c.ban_song())
+            menu.addAction(_('Tired'), lambda: c.tired_song())
         menu.addSeparator()
         # Size (uniform scale) is a Classic-mode concern; Modern resizes by
         # widening for the album art instead.
