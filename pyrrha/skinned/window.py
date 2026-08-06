@@ -535,13 +535,17 @@ class SkinnedWindow(QWidget):
             from gi.repository import Gio, GLib
         except Exception:
             return False
+        # Match by app-id (resourceClass contains "pyrrha") or an exact caption of
+        # "Pyrrha". The caption must be exact — a substring test also flags
+        # unrelated windows that merely mention Pyrrha (e.g. a terminal whose title
+        # is "Pyrrha : … — Konsole").
         js = ('(function(){\n'
               '  var l=(typeof workspace.windowList==="function")?workspace.windowList()\n'
               '        :(typeof workspace.clientList==="function")?workspace.clientList():[];\n'
               '  for(var i=0;i<l.length;i++){var c=l[i];\n'
               '    var rc=((c.resourceClass!=null)?c.resourceClass:"").toString().toLowerCase();\n'
               '    var cap=((c.caption!=null)?c.caption:"").toString();\n'
-              '    if(rc.indexOf("pyrrha")!==-1||cap.indexOf("Pyrrha")!==-1){c.keepAbove=%s;}\n'
+              '    if(rc.indexOf("pyrrha")!==-1||cap==="Pyrrha"){c.keepAbove=%s;}\n'
               '  }})();\n') % ('true' if above else 'false')
         fd, path = tempfile.mkstemp(suffix='.js', prefix='pyrrha-ka-')
         with os.fdopen(fd, 'w') as f:
@@ -654,11 +658,14 @@ class SkinnedWindow(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
-        # A click that activates an unfocused window only focuses it — don't
-        # also fire a control (e.g. the clutterbar D would cycle the size).
+        # A click that merely activates an unfocused window shouldn't fire the
+        # press-sensitive controls (transport, seek, volume/balance) — but the
+        # low-risk toggles handled below (menu/close/minimize/shade, EQ/PL,
+        # clutterbar incl. always-on-top, shuffle/repeat) must still act on that
+        # first click. Otherwise e.g. always-on-top never toggles: you click it
+        # exactly when the window is behind another, and the guard eats the click.
         shell = self.window()
-        if hasattr(shell, 'is_focus_click') and shell.is_focus_click():
-            return
+        focus_click = bool(getattr(shell, 'is_focus_click', lambda: False)())
         pos = (event.position() / self._scale()).toPoint()   # logical coords
         dx = self._dx()
         if MENU.contains(pos):
@@ -699,6 +706,10 @@ class SkinnedWindow(QWidget):
         if REPEAT.contains(pos):
             self.ctl.toggle_repeat()
             self.update()
+            return
+        # Below here are the press-sensitive controls: a bare focus-click must
+        # not fire them (e.g. accidentally hit Stop or jump the seek bar).
+        if focus_click:
             return
         name = self._button_at(pos)
         if name:
