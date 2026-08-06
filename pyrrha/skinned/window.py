@@ -82,7 +82,7 @@ MONO_POS = (212, 41)               # from monoster.bmp: (29,0) lit / (29,12) dim
 VIS_BARS = 19                       # analyzer bars (76px / 4px pitch)
 BAR_FALL = 0.09                     # per-frame bar falloff (rise is instant)
 PEAK_GRAVITY = 0.007                # peak-cap fall acceleration (per frame^2)
-WAVE_HARMONICS = 24                 # low spectrum bins summed into the scope wave
+WAVE_HARMONICS = 16                 # low spectrum bins summed into the scope wave
 
 # Visualizer modes cycled by clicking the display / clutterbar 'V'.
 VIS_BARS_MODE, VIS_LINES, VIS_DOTS, VIS_SCOPE, VIS_OFF = range(5)
@@ -210,23 +210,26 @@ class SkinnedWindow(QWidget):
         return moving
 
     def _advance_wave(self, raw):
-        """Step the oscilloscope one frame. Synthesizes a moving waveform from
-        the low spectrum bands (magnitude-only data), scaled by overall loudness;
-        decays to a flat line when silent. Returns True while anything moves."""
+        """Step the oscilloscope one frame. Sums the low spectrum bands into a
+        time-domain-ish waveform: its amplitude tracks loudness directly (louder
+        music = bigger swings) and every band's phase advances each frame, so the
+        trace keeps moving even between spectrum updates. tanh soft-clips it for a
+        natural scope swing. Decays to a flat line when silent. Returns True while
+        anything is moving."""
         n = len(self._wave)
         if raw:
             amps = raw[:WAVE_HARMONICS]
-            energy = sum(amps)
-            loud = min(1.0, energy / 6.0)             # overall level -> amplitude
-            shape_norm = 1.0 / max(1.0, energy)       # keep the shape in ~[-1, 1]
+            two_pi = 2.0 * math.pi
             for i in range(len(amps)):
-                self._wave_ph[i] += 0.15 + 0.05 * i   # higher bands scroll faster
+                # Fast, spread-out (incommensurate) motion so successive frames
+                # look different rather than a slowly morphing standing wave.
+                self._wave_ph[i] = (self._wave_ph[i] + 0.20 + 0.10 * i) % two_pi
             for x in range(n):
                 t = x / n
                 s = 0.0
                 for i, a in enumerate(amps):
-                    s += a * math.sin(2.0 * math.pi * (i + 1) * t + self._wave_ph[i])
-                self._wave[x] = max(-1.0, min(1.0, s * shape_norm * loud * 1.3))
+                    s += a * math.sin(two_pi * (i + 1) * t + self._wave_ph[i])
+                self._wave[x] = math.tanh(s * 0.8)    # dynamics straight from loudness
             return True
         moving = False
         for x in range(n):
