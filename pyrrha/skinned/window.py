@@ -163,8 +163,6 @@ class SkinnedWindow(QWidget):
             grad = [QColor(int(255 * r / 15), int(255 * (1 - r / 15)), 40)
                     for r in range(16)]
         self._peak_color = pal[23] if len(pal) >= 24 else QColor(255, 255, 255)
-        # Oscilloscope colors (VISCOLOR entries 18..22), indexed by displacement.
-        self._osc_colors = pal[18:23] if len(pal) >= 23 else [QColor(0, 255, 0)]
         # Skin accent (analyzer base color) — used for the position-bar fill.
         self._accent = pal[2] if len(pal) >= 3 else QColor(31, 104, 236)
         h = VIS.height()
@@ -587,10 +585,12 @@ class SkinnedWindow(QWidget):
                     self.skin.sprite('monoster.bmp', 29, mono_y, 27, 12))
 
     def _paint_scope(self, p):
-        """Oscilloscope: a waveform line across the visualization area, colored
-        by displacement from the center (VISCOLOR oscilloscope palette)."""
-        osc = self._osc_colors
-        last = len(osc) - 1
+        """Oscilloscope: a waveform line across the visualization area. Colored
+        from the same palette as the analyzer bars (the active skin's VISCOLOR
+        gradient) so it matches the current theme — a bigger excursion uses a
+        "hotter" color, the way a taller bar does."""
+        colors = self._vis_colors
+        last = len(colors) - 1
         mid = VIS.y() + VIS.height() // 2
         amp = (VIS.height() - 1) / 2.0
         prev_y = None
@@ -598,7 +598,7 @@ class SkinnedWindow(QWidget):
             v = self._wave[x]
             y = mid - int(round(v * amp))
             y = max(VIS.y(), min(VIS.bottom(), y))
-            color = osc[min(last, int(abs(v) * (last + 1)))]
+            color = colors[min(last, int(abs(v) * (last + 1)))]
             px = VIS.x() + x
             if prev_y is None:
                 p.fillRect(px, y, 1, 1, color)
