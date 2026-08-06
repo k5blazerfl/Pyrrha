@@ -88,6 +88,11 @@ WAVE_HARMONICS = 24                 # low spectrum bins summed into the scope wa
 VIS_BARS_MODE, VIS_LINES, VIS_DOTS, VIS_SCOPE, VIS_OFF = range(5)
 VIS_MODES = 5
 
+# Classic Winamp "nullsoft" easter egg: type n, u, l, Esc, l, Esc, s, o, f, t
+# (i.e. "nullsoft" with Escape pressed after each 'l') to flash the llama line.
+EGG_SEQUENCE = ('n', 'u', 'l', 'esc', 'l', 'esc', 's', 'o', 'f', 't')
+EGG_MESSAGE = "IT REALLY WHIPS THE LLAMA'S ASS!"
+
 
 class SkinnedWindow(QWidget):
     def __init__(self, controller, skin, parent=None):
@@ -113,6 +118,7 @@ class SkinnedWindow(QWidget):
         # Transient marquee readout (e.g. "Volume: 72%") shown while adjusting.
         self._readout = None
         self._readout_until = 0.0
+        self._egg_progress = 0    # position in the "nullsoft" easter-egg sequence
         self._vis_colors = self._load_vis_colors()
         self._vis_active = False
         self._vis_mode = VIS_BARS_MODE      # click the display to cycle modes
@@ -271,12 +277,33 @@ class SkinnedWindow(QWidget):
             return 'PYRRHA'
         return '{} - {}'.format(song.artist, song.title)
 
-    def _show_readout(self, text):
+    def _show_readout(self, text, secs=1.2):
         """Briefly replace the title marquee with a status line (volume/balance),
         the way Winamp flashes the level while you drag a slider."""
         self._readout = text
-        self._readout_until = time.monotonic() + 1.2
+        self._readout_until = time.monotonic() + secs
         self._reset_marquee()   # show it from the start, un-scrolled
+
+    def egg_key(self, event):
+        """Feed a key press to the classic 'nullsoft' easter egg matcher. Returns
+        True if the key was consumed by the sequence (matched or restarted it)."""
+        if event.key() == Qt.Key_Escape:
+            token = 'esc'
+        else:
+            text = event.text().lower()
+            if len(text) != 1 or not text.isalpha():
+                self._egg_progress = 0
+                return False
+            token = text
+        if token == EGG_SEQUENCE[self._egg_progress]:
+            self._egg_progress += 1
+            if self._egg_progress == len(EGG_SEQUENCE):
+                self._egg_progress = 0
+                self._show_readout(EGG_MESSAGE, secs=3.0)
+            return True
+        # Mismatch: reset, but let this key start a fresh sequence.
+        self._egg_progress = 1 if token == EGG_SEQUENCE[0] else 0
+        return self._egg_progress == 1
 
     def _reset_marquee(self):
         self._scroll = 0
@@ -933,6 +960,9 @@ class SkinnedShell(QWidget):
         self._modern_skin = self._load_modern_skin() or skin
         self.skin = self._modern_skin if self.mode == 'modern' else self._classic_skin
         self.setWindowTitle('Pyrrha')
+        # Accept keyboard focus so the shell receives key presses (used by the
+        # classic "nullsoft" easter egg); no child panel takes focus.
+        self.setFocusPolicy(Qt.StrongFocus)
         # Fills any area not covered by a panel (e.g. to the right of the
         # fixed-width main/EQ when the playlist is dragged wider).
         self.setAutoFillBackground(True)
@@ -1036,6 +1066,13 @@ class SkinnedShell(QWidget):
         if notches and self.main is not None:
             self.main.change_volume(notches / 27.0)   # one 28-step slider notch
             event.accept()
+
+    def keyPressEvent(self, event):
+        # Feed keys to the classic "nullsoft" easter egg matcher.
+        if self.main is not None and self.main.egg_key(event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def toggle_width(self):
         """Widen the player to reveal the album art beside the EQ (a square),
