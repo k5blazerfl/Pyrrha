@@ -16,7 +16,7 @@ EQMAIN spec and are easy to tune against a real skin.
 """
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QMenu, QWidget
 
 W, H = 275, 116
@@ -85,6 +85,7 @@ class SkinnedEqWindow(QWidget):
         self._closed = False
         self._well_cache = {}       # frame index -> magenta-keyed QImage
         self._wells_present = None   # does this skin have slider wells?
+        self._curve_colors_cache = None   # per-row EQ response-curve colors
 
         # Repaint the album art when the song or its artwork changes. The model's
         # dataChanged is the reliable trigger: art_callback always updates the row
@@ -101,6 +102,7 @@ class SkinnedEqWindow(QWidget):
         self.skin = skin
         self._well_cache = {}
         self._wells_present = None
+        self._curve_colors_cache = None
         self.update()
 
     # ----------------------------------------------------------- slider wells
@@ -305,21 +307,68 @@ class SkinnedEqWindow(QWidget):
                          ay - (scaled.height() - side) // 2, scaled)
             p.restore()
 
+    def _skin_accent(self):
+        """The skin's analyzer base color (VISCOLOR entry 2) — the same color the
+        main window uses for the analyzer/scope/position bar. Used to theme the EQ
+        curve when the skin defines no graph line colors of its own."""
+        pal = []
+        for line in self.skin.text('viscolor.txt').splitlines():
+            parts = [x.strip() for x in line.split('//')[0].split(',')]
+            if len(parts) >= 3 and parts[0]:
+                try:
+                    pal.append(QColor(int(parts[0]), int(parts[1]), int(parts[2])))
+                except ValueError:
+                    pass
+        return pal[2] if len(pal) >= 3 else QColor(20, 200, 90)
+
+    def _curve_colors(self):
+        """19 per-row colors for the EQ response curve. Winamp skins bake a
+        1px-wide, 19px-tall line-color strip into eqmain.bmp at (115, 294); use it
+        when it's a real gradient. Skins that leave it flat/near-background (e.g.
+        Glare) get the skin's theme accent instead of a hardcoded green."""
+        if self._curve_colors_cache is not None:
+            return self._curve_colors_cache
+        img = self.skin.image('eqmain.bmp')
+        strip = []
+        if not img.isNull() and img.width() > 115 and img.height() >= 294 + GRAPH.height():
+            strip = [img.pixelColor(115, 294 + row) for row in range(GRAPH.height())]
+        distinct = {c.getRgb()[:3] for c in strip}
+        if len(distinct) > 1:
+            colors = strip                          # skin's own line gradient
+        else:
+            u = strip[0] if strip else None
+            spread = max(u.red(), u.green(), u.blue()) - min(u.red(), u.green(), u.blue()) if u else 0
+            vivid = u is not None and (spread > 30 or min(u.red(), u.green(), u.blue()) > 80)
+            base = u if vivid else self._skin_accent()
+            colors = [base] * GRAPH.height()
+        self._curve_colors_cache = colors
+        return colors
+
     def _paint_curve(self, p):
-        p.save()
-        p.setClipRect(GRAPH)
-        pen = QPen(QColor(20, 200, 90))
-        pen.setWidth(1)
-        p.setPen(pen)
-        pts = []
+        colors = self._curve_colors()
+        last = len(colors) - 1
+        h, w = GRAPH.height(), GRAPH.width()
+        ys = []
         for i in range(BANDS):
-            x = GRAPH.x() + int(i * (GRAPH.width() - 1) / (BANDS - 1))
             db = self._bands[i] if self._on else 0.0
             f = _clamp((DB_RANGE - db) / (2 * DB_RANGE), 0.0, 1.0)
-            y = GRAPH.y() + int(f * (GRAPH.height() - 1))
-            pts.append((x, y))
-        for a, b in zip(pts, pts[1:]):
-            p.drawLine(a[0], a[1], b[0], b[1])
+            ys.append(f * (h - 1))
+        p.save()
+        p.setClipRect(GRAPH)
+        prev = None
+        for x in range(w):
+            t = x * (BANDS - 1) / max(1, w - 1)     # interpolate between band anchors
+            i0 = int(t)
+            i1 = min(BANDS - 1, i0 + 1)
+            frac = t - i0
+            row = max(0, min(h - 1, int(round(ys[i0] * (1 - frac) + ys[i1] * frac))))
+            if prev is None:
+                p.fillRect(GRAPH.x() + x, GRAPH.y() + row, 1, 1, colors[min(last, row)])
+            else:                                    # fill the vertical span for a solid line
+                lo, hi = (prev, row) if prev <= row else (row, prev)
+                for r in range(lo, hi + 1):
+                    p.fillRect(GRAPH.x() + x, GRAPH.y() + r, 1, 1, colors[min(last, r)])
+            prev = row
         p.restore()
 
     # -------------------------------------------------------------- mouse
