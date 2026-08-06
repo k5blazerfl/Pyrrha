@@ -418,6 +418,9 @@ class PyrrhaWindow(QMainWindow):
                 _('No skins are available. Add a .wsz skin or a skin folder to '
                   '{}.').format(self.skins_dir()))
             return False
+        # Open the curated Modern (album-art) view by default; Classic stays a
+        # click away in the skinned window's mode menu.
+        self.set_skin_mode('modern')
         try:
             from .skinned.skin import Skin
             from .skinned.window import SkinnedShell
