@@ -47,6 +47,9 @@ _ROOT_DEFAULTS = {
     # Which top-level view the player was last in: True = skinned (Winamp)
     # view, False = standard (native) window. Restored at startup.
     'skinned-view': (False, bool),
+    # Local-playback play order (only affects local files).
+    'shuffle': (False, bool),
+    'repeat': (False, bool),
 }
 
 # Plugin child schema. Two flavours, matching the old .plugin / .plugin-enabled

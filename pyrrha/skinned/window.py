@@ -51,6 +51,10 @@ MINIMIZE = [QRect(244, 3, 9, 9), QRect(254, 3, 9, 9)]
 # EQ / playlist toggle buttons (from shufrep.bmp): open or close those panels.
 EQ_TOGGLE = QRect(219, 58, 23, 12)
 PL_TOGGLE = QRect(242, 58, 23, 12)
+# Shuffle/repeat toggles (shufrep.bmp): off row y=0, on row y=30. Affect local
+# playback only. Shuffle 47x15 at (28,y); Repeat 28x15 at (0,y).
+SHUFFLE = QRect(164, 89, 47, 15)
+REPEAT = QRect(210, 89, 28, 15)
 VOLUME = QRect(107, 57, 68, 13)     # slider background area
 VOL_HANDLE_W = 14
 TITLE_AREA = QRect(111, 27, 154, CHAR_H)   # song-title marquee (centered in the display box)
@@ -325,6 +329,12 @@ class SkinnedWindow(QWidget):
                 sy = 73 if panel._closed else 61   # off / on
                 p.drawImage(rect.x() + dx, rect.y(),
                             self.skin.sprite('shufrep.bmp', sx, sy, 23, 12))
+
+        # Shuffle / repeat toggles (lit when on). Play order for local files.
+        p.drawImage(SHUFFLE.x(), SHUFFLE.y(), self.skin.sprite(
+            'shufrep.bmp', 28, 30 if getattr(self.ctl, 'shuffle', False) else 0, 47, 15))
+        p.drawImage(REPEAT.x(), REPEAT.y(), self.skin.sprite(
+            'shufrep.bmp', 0, 30 if getattr(self.ctl, 'repeat', False) else 0, 28, 15))
         p.end()
 
     def _paint_marquee(self, p, gap):
@@ -539,6 +549,14 @@ class SkinnedWindow(QWidget):
                 if QRect(CLUTTER_X, cy, 8, 8).contains(pos):
                     self._clutter_action(label, event.globalPosition().toPoint())
                     return
+        if SHUFFLE.contains(pos):
+            self.ctl.toggle_shuffle()
+            self.update()
+            return
+        if REPEAT.contains(pos):
+            self.ctl.toggle_repeat()
+            self.update()
+            return
         name = self._button_at(pos)
         if name:
             self._pressed = name
@@ -616,6 +634,8 @@ class SkinnedWindow(QWidget):
             c.stop()
         elif name == 'next':
             c.next_song()
+        elif name == 'prev':
+            c.prev_song()   # local playback only; no-op for Pandora
         elif name == 'eject':
             # Eject opens the station switcher, popped below the eject button.
             s = self._scale()
@@ -624,7 +644,6 @@ class SkinnedWindow(QWidget):
                     self._show_stations_menu(
                         self.mapToGlobal(QPoint(int(dx * s), int((dy + h) * s))))
                     break
-        # 'prev' is a no-op: Pandora streams can't be rewound.
 
     def _populate_stations(self, menu):
         """Fill a menu with the user's stations; picking one switches to it."""

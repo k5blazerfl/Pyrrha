@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 import urllib.error
@@ -237,6 +238,10 @@ class PyrrhaWindow(QMainWindow):
         # objects instead of an endless Pandora station.
         self.local_mode = False
         self._local_dir = ''   # last folder used in the open dialogs
+        # Play order for local playback (persisted; ignored for Pandora).
+        self.shuffle = self.settings['shuffle']
+        self.repeat = self.settings['repeat']
+        self._shuffle_order = None   # cached permutation of playlist indices
 
         self.auto_retrying_auth = False
         self.have_stations = False
@@ -881,8 +886,81 @@ class PyrrhaWindow(QMainWindow):
         self.metadata_changed.emit(song)
 
     def next_song(self, *ignore):
-        if self.current_song_index is not None:
-            self.start_song(self.current_song_index + 1)
+        if self.current_song_index is None:
+            return
+        if self.local_mode:
+            idx = self._next_local_index(+1)
+            return self.stop() if idx is None else self.start_song(idx)
+        self.start_song(self.current_song_index + 1)
+
+    def prev_song(self, *ignore):
+        # Only local playback can go backwards; Pandora streams can't be rewound.
+        if not self.local_mode or self.current_song_index is None:
+            return
+        idx = self._next_local_index(-1)
+        if idx is not None:
+            self.start_song(idx)
+
+    def _build_shuffle_order(self, first=None):
+        """A random permutation of the playlist indices. If ``first`` is a valid
+        index it's placed at position 0, so playback continues from the current
+        song and cycles through the rest before wrapping."""
+        order = list(range(len(self.songs_model)))
+        random.shuffle(order)
+        if first is not None and first in order and order[0] != first:
+            order.remove(first)
+            order.insert(0, first)
+        self._shuffle_order = order
+        return order
+
+    def _next_local_index(self, step):
+        """The next playlist index for local playback given shuffle/repeat, or
+        None when the playlist ends and repeat is off."""
+        n = len(self.songs_model)
+        if n == 0:
+            return None
+        cur = self.current_song_index if self.current_song_index is not None else 0
+        if self.shuffle:
+            order = self._shuffle_order
+            if not order or len(order) != n:
+                order = self._build_shuffle_order(first=cur)
+            try:
+                pos = order.index(cur)
+            except ValueError:
+                pos = 0
+            pos += step
+            if 0 <= pos < n:
+                return order[pos]
+            if not self.repeat:
+                return None
+            # Wrap: reshuffle for the new cycle, avoiding an immediate repeat.
+            order = self._build_shuffle_order()
+            end = 0 if step > 0 else n - 1
+            if n > 1 and order[end] == cur:
+                other = 1 if step > 0 else n - 2
+                order[end], order[other] = order[other], order[end]
+            return order[end]
+        idx = cur + step
+        if 0 <= idx < n:
+            return idx
+        if not self.repeat:
+            return None
+        return idx % n
+
+    def set_shuffle(self, on):
+        self.shuffle = bool(on)
+        self.settings['shuffle'] = self.shuffle
+        self._shuffle_order = None
+
+    def set_repeat(self, on):
+        self.repeat = bool(on)
+        self.settings['repeat'] = self.repeat
+
+    def toggle_shuffle(self, *ignore):
+        self.set_shuffle(not self.shuffle)
+
+    def toggle_repeat(self, *ignore):
+        self.set_repeat(not self.repeat)
 
     # ----------------------------------------------------- local playback
     def open_local_files(self, *ignore):
@@ -919,6 +997,7 @@ class PyrrhaWindow(QMainWindow):
         self.current_station = None
         self.current_song_index = None
         self.songs_model.clear()
+        self._shuffle_order = None
         for s in songs:
             s.index = len(self.songs_model)
             self.songs_model.append_song(s)
