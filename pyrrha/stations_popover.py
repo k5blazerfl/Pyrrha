@@ -10,15 +10,13 @@ A frameless ``Qt.Popup`` frame containing a search field, an alphabetical-sort
 toggle and the station list.  Selecting a row emits :attr:`station_selected`.
 """
 
-from gi.repository import Gio
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
     QToolButton, QVBoxLayout,
 )
 
-from . import SETTINGS_SCHEMA
+from .settings import get_settings
 
 
 class StationsPopover(QFrame):
@@ -27,7 +25,7 @@ class StationsPopover(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.Popup)
         self.setFrameShape(QFrame.StyledPanel)
-        self._settings = Gio.Settings.new(SETTINGS_SCHEMA)
+        self._settings = get_settings()
         # rows: list of (station, name, index)
         self._rows = []
 

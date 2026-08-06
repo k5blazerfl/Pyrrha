@@ -92,7 +92,6 @@ class PyrrhaMprisService(DBusServiceObject):
         self.bus_id = 0
         self._qt_conns = []
         self._volumechange_handler_id = None
-        self._sort_order_handler_id = None
 
     def _reset(self):
         self._has_thumbprint_radio = False
@@ -171,11 +170,11 @@ class PyrrhaMprisService(DBusServiceObject):
             signal.connect(slot)
             self._qt_conns.append((signal, slot))
 
-        # GObject-based sources (Gst element, GSettings) keep their handler ids.
+        # The Gst element keeps its GObject handler id; settings changes come
+        # through the Qt ``changed`` signal, filtered by key in the handler.
         self._volumechange_handler_id = window.player.connect(
             'notify::volume', self._volumechange_handler)
-        self._sort_order_handler_id = window.settings.connect(
-            'changed::sort-stations', self._sort_order_handler)
+        window.settings.changed.connect(self._sort_order_handler)
 
     def _disconnect_handlers(self):
         window = self.window
@@ -188,12 +187,15 @@ class PyrrhaMprisService(DBusServiceObject):
         if self._volumechange_handler_id:
             window.player.disconnect(self._volumechange_handler_id)
             self._volumechange_handler_id = None
-        if self._sort_order_handler_id:
-            window.settings.disconnect(self._sort_order_handler_id)
-            self._sort_order_handler_id = None
+        try:
+            window.settings.changed.disconnect(self._sort_order_handler)
+        except (RuntimeError, TypeError):
+            pass
 
     # -- handlers ----------------------------------------------------------
-    def _sort_order_handler(self, *ignore):
+    def _sort_order_handler(self, key=None):
+        if key is not None and key != 'sort-stations':
+            return
         new = ['Alphabetical'] if self.window.settings['sort-stations'] else ['CreationDate']
         if self._orderings != new:
             self._orderings = new

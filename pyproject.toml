@@ -40,4 +40,4 @@ Homepage = "https://pithos.github.io"
 include = ["pyrrha*"]
 
 [tool.setuptools.package-data]
-pyrrha = ["icons/*.png", "data/*.gschema.xml", "data/*.desktop", "README.md"]
+pyrrha = ["icons/*.png", "data/*.desktop", "README.md"]

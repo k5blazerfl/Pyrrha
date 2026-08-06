@@ -57,11 +57,17 @@ def main():
     os.environ.setdefault('PULSE_PROP_media.role', 'music')
 
     app = QApplication(sys.argv)
+    app.setOrganizationName(APP_ID)
     app.setApplicationName('Pyrrha')
     app.setApplicationDisplayName('Pyrrha')
     app.setDesktopFileName(APP_ID)
     from .appicon import app_icon
     app.setWindowIcon(app_icon())
+
+    # Flush the QSettings-backed config to disk on exit (writes are otherwise
+    # only synced periodically by Qt).
+    from .settings import get_settings
+    app.aboutToQuit.connect(get_settings().sync)
 
     # Let Ctrl+C terminate the app from the terminal.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -70,8 +76,8 @@ def main():
     from .migrate import maybe_migrate_from_pithos
     maybe_migrate_from_pithos()
 
-    # Drive the GLib main context so GStreamer, GSettings, libsecret and the
-    # worker keep functioning under Qt's event loop.
+    # Drive the GLib main context so GStreamer, libsecret and the worker keep
+    # functioning under Qt's event loop.
     bridge = GLibBridge()
     bridge.start()
 

@@ -10,7 +10,7 @@
 Same lifecycle as Pithos' ``PithosPlugin`` (prepare → enable → disable) but a
 plain Python object rather than a ``GObject.Object`` — plugins connect to the
 window's Qt signals instead of GObject signals. ``settings`` is a
-``Gio.Settings`` child assigned by the loader.
+:class:`pyrrha.settings.Settings` child assigned by the loader.
 """
 
 import logging

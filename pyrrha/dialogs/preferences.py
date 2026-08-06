@@ -20,8 +20,6 @@ Two tabs:
 
 import logging
 
-from gi.repository import Gio
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
@@ -29,7 +27,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from .. import SETTINGS_SCHEMA
+from ..settings import get_settings
 from ..keyring import SecretService
 
 try:
@@ -76,9 +74,9 @@ class PluginRow(QFrame):
         layout.addWidget(self.toggle)
 
         # Reflect enable-state changes made elsewhere (e.g. a plugin disabling
-        # itself on error). GSettings 'changed' fires via the pumped context.
+        # itself on error).
         if plugin.settings is not None:
-            plugin.settings.connect('changed::enabled', self._on_settings_changed)
+            plugin.settings.changed.connect(self._on_settings_changed)
 
         self._apply_error_state()
 
@@ -102,8 +100,10 @@ class PluginRow(QFrame):
         self._apply_error_state()
         self.config_btn.setVisible(self.plugin.preferences_dialog is not None)
 
-    def _on_settings_changed(self, settings, key):
-        enabled = settings['enabled']
+    def _on_settings_changed(self, key):
+        if key != 'enabled':
+            return
+        enabled = self.plugin.settings['enabled']
         self.toggle.blockSignals(True)
         self.toggle.setChecked(enabled)
         self.toggle.blockSignals(False)
@@ -124,7 +124,7 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(_('Preferences'))
         self.setModal(True)
-        self._settings = Gio.Settings.new(SETTINGS_SCHEMA)
+        self._settings = get_settings()
         self._last_email = ''
         self._last_password = None
         self._plugin_rows = []

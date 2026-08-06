@@ -49,12 +49,17 @@ class JournalLoggingPlugin(PyrrhaPlugin):
         self._apply_level(self.settings['data'] or 'verbose')
         self._logger.addHandler(self._journal)
         # Level changes are made by the Configure dialog writing 'data'.
-        self._settings_conn = self.settings.connect(
-            'changed::data', lambda *a: self._apply_level(self.settings['data'] or 'verbose'))
+        self._settings_conn = lambda key: (
+            self._apply_level(self.settings['data'] or 'verbose')
+            if key == 'data' else None)
+        self.settings.changed.connect(self._settings_conn)
 
     def on_disable(self):
         if self._settings_conn is not None:
-            self.settings.disconnect(self._settings_conn)
+            try:
+                self.settings.changed.disconnect(self._settings_conn)
+            except (RuntimeError, TypeError):
+                pass
             self._settings_conn = None
         self._logger.removeHandler(self._journal)
 

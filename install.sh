@@ -1,7 +1,8 @@
 #!/bin/sh
-# Install Pyrrha's user-local resources: the GSettings schema (compiled), the
-# desktop file and the app icon. No root required (everything goes under
-# $XDG_DATA_HOME, default ~/.local/share). Safe to re-run.
+# Install Pyrrha's user-local resources: the desktop file and the app icon. No
+# root required (everything goes under $XDG_DATA_HOME, default ~/.local/share).
+# Safe to re-run. Configuration is stored via QSettings (~/.config), so there is
+# no GSettings schema to install or compile.
 set -e
 
 here=$(dirname "$(readlink -f "$0")")
@@ -9,13 +10,6 @@ data="$here/pyrrha/data"
 datahome="${XDG_DATA_HOME:-$HOME/.local/share}"
 
 APP_ID=io.github.k5blazerfl.Pyrrha
-
-# --- GSettings schema ---
-schemadir="$datahome/glib-2.0/schemas"
-mkdir -p "$schemadir"
-cp "$data/$APP_ID.gschema.xml" "$schemadir/"
-glib-compile-schemas "$schemadir"
-echo "Installed + compiled GSettings schema into $schemadir"
 
 # --- Desktop file ---
 appsdir="$datahome/applications"

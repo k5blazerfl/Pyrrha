@@ -67,7 +67,7 @@ class NotificationIconPlugin(PyrrhaPlugin):
         self._build_menu()
 
         self.preferences_dialog = TrayIconPrefsDialog(self.window, self.settings)
-        self.settings.connect('changed::data', self._on_icon_changed)
+        self.settings.changed.connect(self._on_icon_changed)
 
         # Wiring recorded so we can undo it on disable.
         self._interceptor = None
@@ -110,8 +110,10 @@ class NotificationIconPlugin(PyrrhaPlugin):
         if song is not None:
             self.tray.setToolTip('{} - {}'.format(song.title, song.artist))
 
-    def _on_icon_changed(self, settings, key):
-        self.tray.setIcon(_resolve_icon(settings['data']))
+    def _on_icon_changed(self, key):
+        if key != 'data':
+            return
+        self.tray.setIcon(_resolve_icon(self.settings['data']))
 
     # -- close-to-tray -----------------------------------------------------
     def _close_interceptor(self):

@@ -32,7 +32,7 @@ import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstAudio', '1.0')
 gi.require_version('GstPbutils', '1.0')
-from gi.repository import Gst, GstAudio, GstPbutils, Gio, GLib
+from gi.repository import Gst, GstAudio, GstPbutils, GLib
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
@@ -50,7 +50,8 @@ from .pandora.data import (
     client_keys, default_client_id, default_one_client_id,
 )
 
-from . import SETTINGS_SCHEMA, __version__
+from . import __version__
+from .settings import get_settings
 from .appicon import app_icon
 from .keyring import SecretService, is_flatpak
 from .models import ALBUM_ART_SIZE, AlbumArtDelegate, SongsModel, SongRole
@@ -145,11 +146,8 @@ class PyrrhaWindow(QMainWindow):
         self.setWindowTitle('Pyrrha')
         self.setWindowIcon(app_icon())
 
-        self.settings = Gio.Settings.new(SETTINGS_SCHEMA)
-        self.settings.connect('changed::audio-quality', lambda *a: self.set_audio_quality())
-        self.settings.connect('changed::proxy', lambda *a: self.set_proxy())
-        self.settings.connect('changed::control-proxy', lambda *a: self.set_proxy())
-        self.settings.connect('changed::control-proxy-pac', lambda *a: self.set_proxy())
+        self.settings = get_settings()
+        self.settings.changed.connect(self._on_setting_changed)
 
         self.prefs_dlg = PreferencesDialog(self)
         self.prefs_dlg.login_changed.connect(self.pandora_reconnect)
@@ -512,6 +510,14 @@ class PyrrhaWindow(QMainWindow):
             return proxy
         system_proxies = urllib.request.getproxies()
         return system_proxies.get('http')
+
+    def _on_setting_changed(self, key):
+        # Stands in for GSettings' per-key ``changed::`` handlers: one slot on
+        # the ``changed`` signal, dispatched by key.
+        if key == 'audio-quality':
+            self.set_audio_quality()
+        elif key in ('proxy', 'control-proxy', 'control-proxy-pac'):
+            self.set_proxy()
 
     def set_proxy(self, *ignore, reconnect=True):
         from .pandora import pandora
