@@ -87,6 +87,8 @@ class SkinnedWindow(QWidget):
 
         self._pressed = None      # currently-held transport button
         self._vol_dragging = False
+        self._seek_dragging = False   # scrubbing the position bar (local files)
+        self._seek_frac = 0.0         # preview fraction while scrubbing
         self._win_drag = None     # window-move offset
         self._scroll = 0          # marquee scroll offset
         self._time_remaining = False   # False = elapsed, True = remaining (-MM:SS)
@@ -297,7 +299,8 @@ class SkinnedWindow(QWidget):
         # Bitrate / sample-rate / stereo indicators (left-anchored).
         self._paint_stream_info(p)
 
-        # Song-progress bar (left-anchored, non-interactive: Pandora can't seek).
+        # Song-progress bar. Draggable to seek for local files; Pandora streams
+        # aren't seekable, so it's display-only there (see ctl.seekable()).
         self._paint_position(p)
 
         # Volume: filled background frame + handle (left-anchored).
@@ -337,16 +340,23 @@ class SkinnedWindow(QWidget):
             p.drawImage(area.x() - off + span, area.y(), img)
         p.restore()
 
-    def _paint_position(self, p):
+    def _posbar_geom(self):
         # Stretch the bar to the window width, keeping the native right margin.
         x, y, h = POSBAR.x(), POSBAR.y(), POSBAR.height()
         bar_w = max(1, self._lw() - x - POSBAR_RIGHT_MARGIN)
+        return x, y, bar_w, h
+
+    def _paint_position(self, p):
+        x, y, bar_w, h = self._posbar_geom()
         p.drawImage(QRect(x, y, bar_w, h), self.skin.sprite('posbar.bmp', 0, 0, 248, 10))
-        pos = self.ctl.query_position()
-        dur = self.ctl.query_duration()
-        if not (pos and dur and dur > 0):
-            return
-        frac = min(1.0, max(0.0, pos / dur))
+        if self._seek_dragging:
+            frac = self._seek_frac        # follow the cursor while scrubbing
+        else:
+            pos = self.ctl.query_position()
+            dur = self.ctl.query_duration()
+            if not (pos and dur and dur > 0):
+                return
+            frac = min(1.0, max(0.0, pos / dur))
         if getattr(self.window(), 'mode', 'modern') == 'classic':
             # Authentic Winamp slider knob from the skin.
             tx = x + int(frac * (bar_w - POSBAR_THUMB_W))
@@ -538,6 +548,13 @@ class SkinnedWindow(QWidget):
             self._vol_dragging = True
             self._set_volume_from_x(pos.x())
             return
+        if self.ctl.seekable():
+            bx, by, bar_w, bh = self._posbar_geom()
+            if QRect(bx, by, bar_w, bh).adjusted(0, -2, 0, 2).contains(pos):
+                self._seek_dragging = True
+                self._seek_frac = self._seek_frac_from_x(pos.x())
+                self.update()
+                return
         if pos.y() < TITLEBAR[3]:   # drag the whole shell by the title bar
             handle = self.window().windowHandle()
             if handle is not None:
@@ -546,6 +563,9 @@ class SkinnedWindow(QWidget):
     def mouseMoveEvent(self, event):
         if self._vol_dragging:
             self._set_volume_from_x((event.position() / self._scale()).x())
+        elif self._seek_dragging:
+            self._seek_frac = self._seek_frac_from_x((event.position() / self._scale()).x())
+            self.update()
 
     def mouseReleaseEvent(self, event):
         pos = event.position().toPoint()
@@ -554,12 +574,22 @@ class SkinnedWindow(QWidget):
                 self._activate(self._pressed)
             self._pressed = None
             self.update()
+        if self._seek_dragging:
+            dur = self.ctl.query_duration()
+            if dur:
+                self.ctl.seek(int(self._seek_frac * dur))
+            self._seek_dragging = False
+            self.update()
         self._vol_dragging = False
         self._win_drag = None
 
     def _set_volume_from_x(self, x):
         frac = (x - VOLUME.x()) / max(1, VOLUME.width() - VOL_HANDLE_W)
         self._set_volume(frac)
+
+    def _seek_frac_from_x(self, x):
+        bx, _y, bar_w, _h = self._posbar_geom()
+        return min(1.0, max(0.0, (x - bx) / max(1, bar_w)))
 
     def _set_volume(self, frac):
         self._volume = min(1.0, max(0.0, frac))

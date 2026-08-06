@@ -862,7 +862,13 @@ class PyrrhaWindow(QMainWindow):
             self.player.set_property('buffer-size', int(song.bitrate) * 375)
             self.player.set_property('connection-speed', int(song.bitrate))
         self.player.set_property("uri", audioUrl)
-        self._set_player_state(PseudoGst.BUFFERING)
+        if self.local_mode:
+            # Local files don't emit network buffering messages, so the
+            # BUFFERING→PLAYING transition (driven by message::buffering) never
+            # fires — play immediately instead.
+            self._set_player_state(PseudoGst.PLAYING, change_gst_state=True)
+        else:
+            self._set_player_state(PseudoGst.BUFFERING)
         self.playcount += 1
 
         self.current_song.start_time = time.time()
@@ -1131,6 +1137,26 @@ class PyrrhaWindow(QMainWindow):
     def query_duration(self):
         if self.player.query(self._query_duration):
             return self._query_duration.parse_duration()[1]
+
+    def seekable(self):
+        """Only local files can be seeked; Pandora streams cannot."""
+        return self.local_mode
+
+    def seek(self, position_ns):
+        """Seek the player to an absolute position (nanoseconds)."""
+        if not self.seekable():
+            return
+        dur = self.query_duration()
+        position_ns = int(max(0, position_ns))
+        if dur:
+            position_ns = min(position_ns, dur)
+        self.player.seek_simple(
+            Gst.Format.TIME,
+            Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, position_ns)
+        # Reflect the new position immediately in the song row / skin.
+        if self.current_song is not None:
+            self.current_song.position = position_ns
+        self.update_song_row()
 
     def query_buffer(self):
         if self.player.query(self._query_buffer):
