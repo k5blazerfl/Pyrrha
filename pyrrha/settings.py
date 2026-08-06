@@ -43,6 +43,7 @@ _ROOT_DEFAULTS = {
     'control-proxy-pac': ('', str),
     'force-client': ('', str),
     'volume': (0.7, float),
+    'balance': (0.0, float),
     'audio-quality': ('highQuality', str),
     # Which top-level view the player was last in: True = skinned (Winamp)
     # view, False = standard (native) window. Restored at startup.

@@ -191,6 +191,8 @@ class PyrrhaWindow(QMainWindow):
         self.rglimiter = Gst.ElementFactory.make("rglimiter", "rglimiter")
         self.rglimiter.set_property("enabled", False)
         self.equalizer = Gst.ElementFactory.make("equalizer-10bands", "equalizer-10bands")
+        # Stereo balance/pan for the skinned main window (optional element).
+        self.panorama = Gst.ElementFactory.make("audiopanorama", "audiopanorama")
         # Spectrum analyzer feeding the skinned visualizer (optional element).
         self.spectrum_bands = [0.0] * SPECTRUM_BANDS
         self.spectrum = Gst.ElementFactory.make("spectrum", "spectrum")
@@ -208,6 +210,8 @@ class PyrrhaWindow(QMainWindow):
         audiosink = Gst.ElementFactory.make("autoaudiosink", "audiosink")
         sinkbin = Gst.Bin()
         chain = [self.rgvolume, self.rglimiter, self.equalizer]
+        if self.panorama is not None:
+            chain.append(self.panorama)
         if self.spectrum is not None:
             chain.append(self.spectrum)
         chain += [audioconvert, audioresample, audiosink]
@@ -340,8 +344,9 @@ class PyrrhaWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self.resize(500, 550)
 
-        # Apply the persisted volume to the player.
+        # Apply the persisted volume and balance to the player.
         self.set_player_volume(self.settings['volume'])
+        self.set_player_balance(self.settings['balance'])
 
     def _icon(self, *names):
         for name in names:
@@ -1758,6 +1763,11 @@ class PyrrhaWindow(QMainWindow):
     # --------------------------------------------------------------- volume
     def set_player_volume(self, value):
         self.player.set_property("volume", math.pow(value, 3))
+
+    def set_player_balance(self, value):
+        """Set stereo balance in [-1, 1] (-1 full left, 0 center, +1 right)."""
+        if self.panorama is not None:
+            self.panorama.set_property("panorama", max(-1.0, min(1.0, float(value))))
 
     def on_volume_slider_changed(self, value):
         v = value / 100.0

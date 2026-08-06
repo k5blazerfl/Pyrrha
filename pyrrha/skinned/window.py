@@ -13,6 +13,7 @@ against a real skin.
 """
 
 import logging
+import math
 import os
 import time
 
@@ -58,6 +59,9 @@ SHUFFLE = QRect(164, 89, 47, 15)
 REPEAT = QRect(210, 89, 28, 15)
 VOLUME = QRect(107, 57, 68, 13)     # slider background area
 VOL_HANDLE_W = 14
+BALANCE = QRect(177, 57, 38, 13)    # stereo balance slider (right of volume)
+BAL_HANDLE_W = 14
+BAL_SNAP = 0.08                     # dead-zone that snaps the handle to center
 TITLE_AREA = QRect(111, 27, 154, CHAR_H)   # song-title marquee (centered in the display box)
 TIME_POS = [(48, 26), (60, 26), (78, 26), (90, 26)]  # MM:SS digit slots
 MINUS_POS = (36, 26)                # leading "-" shown in remaining-time mode
@@ -78,6 +82,11 @@ MONO_POS = (212, 41)               # from monoster.bmp: (29,0) lit / (29,12) dim
 VIS_BARS = 19                       # analyzer bars (76px / 4px pitch)
 BAR_FALL = 0.09                     # per-frame bar falloff (rise is instant)
 PEAK_GRAVITY = 0.007                # peak-cap fall acceleration (per frame^2)
+WAVE_HARMONICS = 24                 # low spectrum bins summed into the scope wave
+
+# Visualizer modes cycled by clicking the display / clutterbar 'V'.
+VIS_BARS_MODE, VIS_LINES, VIS_DOTS, VIS_SCOPE, VIS_OFF = range(5)
+VIS_MODES = 5
 
 
 class SkinnedWindow(QWidget):
@@ -93,19 +102,26 @@ class SkinnedWindow(QWidget):
         self._collapsed = False   # windowshade: collapsed to the title bar
         self._pressed = None      # currently-held transport button
         self._vol_dragging = False
+        self._bal_dragging = False
         self._seek_dragging = False   # scrubbing the position bar (local files)
         self._seek_frac = 0.0         # preview fraction while scrubbing
         self._win_drag = None     # window-move offset
         self._scroll = 0          # marquee scroll offset
         self._time_remaining = False   # False = elapsed, True = remaining (-MM:SS)
         self._volume = float(controller.settings['volume'])
+        self._balance = float(controller.settings['balance'])
+        # Transient marquee readout (e.g. "Volume: 72%") shown while adjusting.
+        self._readout = None
+        self._readout_until = 0.0
         self._vis_colors = self._load_vis_colors()
         self._vis_active = False
-        self._vis_mode = 0                  # 0 bars, 1 lines, 2 dots, 3 off (click to cycle)
+        self._vis_mode = VIS_BARS_MODE      # click the display to cycle modes
         self._bar = [0.0] * VIS_BARS        # current bar heights (0..1)
         self._peak = [0.0] * VIS_BARS       # falling peak-cap positions
         self._peak_vel = [0.0] * VIS_BARS   # peak-cap velocities
         self._vis_edges_cache = None        # cached log-frequency bin edges
+        self._wave = [0.0] * VIS.width()    # oscilloscope samples (-1..1)
+        self._wave_ph = [i * 0.7 for i in range(WAVE_HARMONICS)]   # per-harmonic phase
 
         # Live updates from the controller.
         controller.song_changed.connect(lambda *_: self._reset_marquee())
@@ -141,6 +157,8 @@ class SkinnedWindow(QWidget):
             grad = [QColor(int(255 * r / 15), int(255 * (1 - r / 15)), 40)
                     for r in range(16)]
         self._peak_color = pal[23] if len(pal) >= 24 else QColor(255, 255, 255)
+        # Oscilloscope colors (VISCOLOR entries 18..22), indexed by displacement.
+        self._osc_colors = pal[18:23] if len(pal) >= 23 else [QColor(0, 255, 0)]
         # Skin accent (analyzer base color) — used for the position-bar fill.
         self._accent = pal[2] if len(pal) >= 3 else QColor(31, 104, 236)
         h = VIS.height()
@@ -185,12 +203,41 @@ class SkinnedWindow(QWidget):
                 moving = True
         return moving
 
+    def _advance_wave(self, raw):
+        """Step the oscilloscope one frame. Synthesizes a moving waveform from
+        the low spectrum bands (magnitude-only data), scaled by overall loudness;
+        decays to a flat line when silent. Returns True while anything moves."""
+        n = len(self._wave)
+        if raw:
+            amps = raw[:WAVE_HARMONICS]
+            energy = sum(amps)
+            loud = min(1.0, energy / 6.0)             # overall level -> amplitude
+            shape_norm = 1.0 / max(1.0, energy)       # keep the shape in ~[-1, 1]
+            for i in range(len(amps)):
+                self._wave_ph[i] += 0.15 + 0.05 * i   # higher bands scroll faster
+            for x in range(n):
+                t = x / n
+                s = 0.0
+                for i, a in enumerate(amps):
+                    s += a * math.sin(2.0 * math.pi * (i + 1) * t + self._wave_ph[i])
+                self._wave[x] = max(-1.0, min(1.0, s * shape_norm * loud * 1.3))
+            return True
+        moving = False
+        for x in range(n):
+            self._wave[x] *= 0.82
+            if abs(self._wave[x]) > 0.002:
+                moving = True
+        return moving
+
     def _vis_tick(self):
-        if self._vis_mode == 3:            # visualizer off — no repaints needed
+        if self._vis_mode == VIS_OFF:      # visualizer off — no repaints needed
             return
         playing = self.ctl.playing
         raw = getattr(self.ctl, 'spectrum_bands', None) if playing else None
-        moving = self._advance_vis(raw)
+        if self._vis_mode == VIS_SCOPE:
+            moving = self._advance_wave(raw)
+        else:
+            moving = self._advance_vis(raw)
         if playing or moving or self._vis_active:
             self.update()
         self._vis_active = playing or moving
@@ -217,10 +264,19 @@ class SkinnedWindow(QWidget):
             self.window().load_skin(path)
 
     def _title_text(self):
+        if self._readout and time.monotonic() < self._readout_until:
+            return self._readout
         song = self.ctl.current_song
         if song is None:
             return 'PYRRHA'
         return '{} - {}'.format(song.artist, song.title)
+
+    def _show_readout(self, text):
+        """Briefly replace the title marquee with a status line (volume/balance),
+        the way Winamp flashes the level while you drag a slider."""
+        self._readout = text
+        self._readout_until = time.monotonic() + 1.2
+        self._reset_marquee()   # show it from the start, un-scrolled
 
     def _reset_marquee(self):
         self._scroll = 0
@@ -314,6 +370,16 @@ class SkinnedWindow(QWidget):
         p.drawImage(hx, VOLUME.y() + 1,
                     self.skin.sprite('volume.bmp',
                                      0 if self._vol_dragging else 15, 422, VOL_HANDLE_W, 11))
+
+        # Balance: background frame (row 0 = centered) + handle (left-anchored).
+        if self.skin.has('balance.bmp'):
+            blvl = min(27, round(abs(self._balance) * 27))
+            p.drawImage(BALANCE.x(), BALANCE.y(),
+                        self.skin.sprite('balance.bmp', 9, blvl * 15, 38, 13))
+            bhx = BALANCE.x() + round((self._balance + 1) / 2 * (BALANCE.width() - BAL_HANDLE_W))
+            p.drawImage(bhx, BALANCE.y() + 1,
+                        self.skin.sprite('balance.bmp',
+                                         0 if self._bal_dragging else 15, 422, BAL_HANDLE_W, 11))
 
         # Transport buttons (left-anchored).
         for name, bx, by, w, h, sx, sy_n, sy_p in BUTTONS:
@@ -419,7 +485,7 @@ class SkinnedWindow(QWidget):
             cur = getattr(shell, 'scale', 1.0)
             shell.set_scale(1.5 if cur < 1.25 else 2.0 if cur < 1.75 else 1.0)
         elif label == 'V':                     # Visualization mode
-            self._vis_mode = (self._vis_mode + 1) % 4
+            self._vis_mode = (self._vis_mode + 1) % VIS_MODES
             self.update()
 
     def _kwin_keep_above(self, above):
@@ -490,8 +556,32 @@ class SkinnedWindow(QWidget):
         p.drawImage(MONO_POS[0], MONO_POS[1],
                     self.skin.sprite('monoster.bmp', 29, mono_y, 27, 12))
 
+    def _paint_scope(self, p):
+        """Oscilloscope: a waveform line across the visualization area, colored
+        by displacement from the center (VISCOLOR oscilloscope palette)."""
+        osc = self._osc_colors
+        last = len(osc) - 1
+        mid = VIS.y() + VIS.height() // 2
+        amp = (VIS.height() - 1) / 2.0
+        prev_y = None
+        for x in range(VIS.width()):
+            v = self._wave[x]
+            y = mid - int(round(v * amp))
+            y = max(VIS.y(), min(VIS.bottom(), y))
+            color = osc[min(last, int(abs(v) * (last + 1)))]
+            px = VIS.x() + x
+            if prev_y is None:
+                p.fillRect(px, y, 1, 1, color)
+            else:                      # join to the previous sample for a solid trace
+                lo, hi = (prev_y, y) if prev_y <= y else (y, prev_y)
+                p.fillRect(px, lo, 1, hi - lo + 1, color)
+            prev_y = y
+
     def _paint_visualizer(self, p):
-        if self._vis_mode == 3:        # off
+        if self._vis_mode == VIS_OFF:
+            return
+        if self._vis_mode == VIS_SCOPE:
+            self._paint_scope(p)
             return
         colors = self._vis_colors
         top_row = len(colors) - 1
@@ -502,10 +592,10 @@ class SkinnedWindow(QWidget):
         for i in range(VIS_BARS):
             x = VIS.x() + i * bar_w
             h = int(round(self._bar[i] * height))
-            if self._vis_mode == 1:    # thin lines (1px wide)
+            if self._vis_mode == VIS_LINES:    # thin lines (1px wide)
                 for row in range(h):
                     p.fillRect(x, bottom - row, 1, 1, colors[min(row, top_row)])
-            elif self._vis_mode == 2:  # dots (top of each bar only)
+            elif self._vis_mode == VIS_DOTS:   # dots (top of each bar only)
                 if h > 0:
                     p.fillRect(x, bottom - (h - 1), w, 1, colors[min(h - 1, top_row)])
             else:                      # bars (filled) with a falling peak cap
@@ -555,7 +645,7 @@ class SkinnedWindow(QWidget):
             self.update()
             return
         if VIS.contains(pos):              # cycle visualizer mode
-            self._vis_mode = (self._vis_mode + 1) % 4
+            self._vis_mode = (self._vis_mode + 1) % VIS_MODES
             self.update()
             return
         if getattr(self.window(), 'mode', 'modern') == 'classic':
@@ -580,6 +670,10 @@ class SkinnedWindow(QWidget):
             self._vol_dragging = True
             self._set_volume_from_x(pos.x())
             return
+        if self.skin.has('balance.bmp') and BALANCE.adjusted(0, -2, 0, 2).contains(pos):
+            self._bal_dragging = True
+            self._set_balance_from_x(pos.x())
+            return
         if self.ctl.seekable():
             bx, by, bar_w, bh = self._posbar_geom()
             if QRect(bx, by, bar_w, bh).adjusted(0, -2, 0, 2).contains(pos):
@@ -595,6 +689,8 @@ class SkinnedWindow(QWidget):
     def mouseMoveEvent(self, event):
         if self._vol_dragging:
             self._set_volume_from_x((event.position() / self._scale()).x())
+        elif self._bal_dragging:
+            self._set_balance_from_x((event.position() / self._scale()).x())
         elif self._seek_dragging:
             self._seek_frac = self._seek_frac_from_x((event.position() / self._scale()).x())
             self.update()
@@ -613,6 +709,7 @@ class SkinnedWindow(QWidget):
             self._seek_dragging = False
             self.update()
         self._vol_dragging = False
+        self._bal_dragging = False
         self._win_drag = None
 
     def mouseDoubleClickEvent(self, event):
@@ -633,6 +730,10 @@ class SkinnedWindow(QWidget):
         frac = (x - VOLUME.x()) / max(1, VOLUME.width() - VOL_HANDLE_W)
         self._set_volume(frac)
 
+    def _set_balance_from_x(self, x):
+        frac = (x - BALANCE.x()) / max(1, BALANCE.width() - BAL_HANDLE_W)
+        self._set_balance(frac * 2.0 - 1.0)
+
     def _seek_frac_from_x(self, x):
         bx, _y, bar_w, _h = self._posbar_geom()
         return min(1.0, max(0.0, (x - bx) / max(1, bar_w)))
@@ -641,6 +742,21 @@ class SkinnedWindow(QWidget):
         self._volume = min(1.0, max(0.0, frac))
         self.ctl.set_player_volume(self._volume)
         self.ctl.settings.set_double('volume', self._volume)
+        self._show_readout(_('Volume: {}%').format(round(self._volume * 100)))
+        self.update()
+
+    def _set_balance(self, value):
+        value = max(-1.0, min(1.0, value))
+        if abs(value) < BAL_SNAP:      # dead-zone snap to dead-center
+            value = 0.0
+        self._balance = value
+        self.ctl.set_player_balance(value)
+        self.ctl.settings.set_double('balance', value)
+        if value == 0.0:
+            self._show_readout(_('Balance: center'))
+        else:
+            side = _('right') if value > 0 else _('left')
+            self._show_readout(_('Balance: {}% {}').format(round(abs(value) * 100), side))
         self.update()
 
     def change_volume(self, delta):
