@@ -440,7 +440,7 @@ class PyrrhaWindow(QMainWindow):
         menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
         menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
         menu.addSeparator()
-        self._skin_action = menu.addAction(_('Winamp Skin'), self.show_skinned_view)
+        self._skin_action = menu.addAction(_('Skinned Mode'), self.show_skinned_view)
         menu.addSeparator()
         menu.addAction(_('Help'), lambda: self.open_url('https://github.com/k5blazerfl/Pyrrha'))
         menu.addAction(_('About'), self.show_about)
