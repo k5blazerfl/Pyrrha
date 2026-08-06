@@ -7,7 +7,7 @@
 """Winamp bitmap fonts: the 5x6 TEXT.BMP font and the 9x13 NUMBERS.BMP digits."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter
 
 # TEXT.BMP character map: each cell is 5x6, laid out in rows. Uppercase only
 # (Winamp displays titles uppercased). Standard classic layout.
@@ -58,12 +58,39 @@ class NumberFont:
         self.bmp = 'numbers.bmp' if skin.has('numbers.bmp') else 'nums_ex.bmp'
         img = skin.image(self.bmp)
         self._cells = (img.width() // NUM_W) if img is not None and not img.isNull() else 11
+        self._minus_cache = None
 
     def digit(self, ch):
         if ch.isdigit():
             idx = int(ch)
-        elif ch == '-' and self._cells >= 12:
-            idx = 11
+        elif ch == '-':
+            if self._cells >= 12:
+                idx = 11               # extended font ships a real minus glyph
+            else:
+                return self._synthetic_minus()   # older numbers.bmp lacks one
         else:
-            idx = 10   # blank cell (spaces / colon gaps / minus fallback)
+            idx = 10                   # blank cell (spaces / colon gaps)
         return self.skin.sprite(self.bmp, idx * NUM_W, 0, NUM_W, NUM_H)
+
+    def _synthetic_minus(self):
+        """A minus glyph for skins whose number font has no cell 11 (plain
+        numbers.bmp). Drawn on the font's blank cell so it sits on the right
+        background, with a centered bar in the digits' own color (sampled as the
+        brightest pixel in the sheet, which is a lit digit stroke)."""
+        if self._minus_cache is None:
+            img = self.skin.sprite(self.bmp, 10 * NUM_W, 0, NUM_W, NUM_H
+                                   ).convertToFormat(QImage.Format_ARGB32)
+            sheet = self.skin.image(self.bmp)
+            color, best = QColor(210, 210, 210), -1
+            if sheet is not None and not sheet.isNull():
+                for x in range(min(sheet.width(), 10 * NUM_W)):
+                    for y in range(sheet.height()):
+                        c = sheet.pixelColor(x, y)
+                        if c.lightness() > best:
+                            best, color = c.lightness(), c
+            p = QPainter(img)
+            bar_w = 5
+            p.fillRect((NUM_W - bar_w) // 2, NUM_H // 2, bar_w, 1, color)
+            p.end()
+            self._minus_cache = img
+        return self._minus_cache
