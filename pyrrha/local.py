@@ -32,7 +32,7 @@ from .pandora import RATE_NONE
 # drives the file dialog filter and the folder scan.
 AUDIO_EXTENSIONS = (
     '.mp3', '.flac', '.ogg', '.oga', '.opus', '.m4a', '.aac', '.wav', '.wave',
-    '.wma', '.ape', '.mpc', '.aiff', '.aif', '.alac', '.wv', '.spx',
+    '.wma', '.ape', '.aiff', '.aif', '.alac', '.wv', '.spx',
 )
 
 _discoverer = None

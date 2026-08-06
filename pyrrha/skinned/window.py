@@ -46,8 +46,9 @@ BUTTONS = [
 TITLEBAR = (0, 0, 275, 14)          # dest; src active (27,0), inactive (27,15)
 MENU = QRect(6, 3, 9, 9)            # top-left main-menu (options) button
 CLOSE = QRect(264, 3, 9, 9)
-# The main title bar's minimize + windowshade buttons; either minimizes the app.
-MINIMIZE = [QRect(244, 3, 9, 9), QRect(254, 3, 9, 9)]
+# Main title bar buttons: minimize (to taskbar) and windowshade (collapse).
+MINIMIZE = QRect(244, 3, 9, 9)
+SHADE_BTN = QRect(254, 3, 9, 9)
 # EQ / playlist toggle buttons (from shufrep.bmp): open or close those panels.
 EQ_TOGGLE = QRect(219, 58, 23, 12)
 PL_TOGGLE = QRect(242, 58, 23, 12)
@@ -89,6 +90,7 @@ class SkinnedWindow(QWidget):
         self.setFixedSize(W, H)
         self.setWindowTitle('Pyrrha')
 
+        self._collapsed = False   # windowshade: collapsed to the title bar
         self._pressed = None      # currently-held transport button
         self._vol_dragging = False
         self._seek_dragging = False   # scrubbing the position bar (local files)
@@ -254,6 +256,10 @@ class SkinnedWindow(QWidget):
             p.scale(s, s)   # everything below is drawn in logical coords
 
         lw = self._lw()
+        if self._collapsed:   # windowshade: draw only the title bar
+            self._paint_titlebar(p, lw)
+            p.end()
+            return
         gap = lw - W        # extra width to fill (0 at native size)
         dx = gap            # right-anchored controls shift by this much
         rkeep = W - SPLIT   # width of the right slice, anchored to the right edge
@@ -270,14 +276,7 @@ class SkinnedWindow(QWidget):
         # Title bar: tile the fill across the full width, keep the end corners
         # (which carry the menu/close/minimize glyphs), and re-center the title
         # graphic so it stays centered as the window widens.
-        ty = 0 if self.isActiveWindow() else 15
-        p.drawImage(QRect(0, 0, lw, 14),
-                    self.skin.sprite('titlebar.bmp', 27 + TB_CORNER + 1, ty, 1, 14))
-        p.drawImage(0, 0, self.skin.sprite('titlebar.bmp', 27, ty, TB_CORNER, 14))
-        p.drawImage(lw - TB_CORNER, 0,
-                    self.skin.sprite('titlebar.bmp', 27 + W - TB_CORNER, ty, TB_CORNER, 14))
-        p.drawImage((lw - TB_TITLE) // 2, 0,
-                    self.skin.sprite('titlebar.bmp', 27 + (W - TB_TITLE) // 2, ty, TB_TITLE, 14))
+        self._paint_titlebar(p, lw)
 
         # Playback status indicator (left-anchored).
         p.drawImage(STATUS_POS[0], STATUS_POS[1],
@@ -336,6 +335,18 @@ class SkinnedWindow(QWidget):
         p.drawImage(REPEAT.x(), REPEAT.y(), self.skin.sprite(
             'shufrep.bmp', 0, 30 if getattr(self.ctl, 'repeat', False) else 0, 28, 15))
         p.end()
+
+    def _paint_titlebar(self, p, lw):
+        # Tile the fill across the full width, keep the end corners (menu/close/
+        # minimize glyphs), and re-center the title graphic.
+        ty = 0 if self.isActiveWindow() else 15
+        p.drawImage(QRect(0, 0, lw, 14),
+                    self.skin.sprite('titlebar.bmp', 27 + TB_CORNER + 1, ty, 1, 14))
+        p.drawImage(0, 0, self.skin.sprite('titlebar.bmp', 27, ty, TB_CORNER, 14))
+        p.drawImage(lw - TB_CORNER, 0,
+                    self.skin.sprite('titlebar.bmp', 27 + W - TB_CORNER, ty, TB_CORNER, 14))
+        p.drawImage((lw - TB_TITLE) // 2, 0,
+                    self.skin.sprite('titlebar.bmp', 27 + (W - TB_TITLE) // 2, ty, TB_TITLE, 14))
 
     def _paint_marquee(self, p, gap):
         img = self.text_font.render(self._title_text() + '   ***   ')
@@ -527,8 +538,11 @@ class SkinnedWindow(QWidget):
         if CLOSE.translated(dx, 0).contains(pos):
             self.ctl.quit()
             return
-        if any(r.translated(dx, 0).contains(pos) for r in MINIMIZE):
+        if MINIMIZE.translated(dx, 0).contains(pos):
             self.window().showMinimized()
+            return
+        if SHADE_BTN.translated(dx, 0).contains(pos):
+            self._toggle_shade()
             return
         if EQ_TOGGLE.translated(dx, 0).contains(pos):
             self.window().toggle_panel(getattr(self.window(), 'eq', None))
@@ -601,6 +615,20 @@ class SkinnedWindow(QWidget):
         self._vol_dragging = False
         self._win_drag = None
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        pos = (event.position() / self._scale()).toPoint()
+        if pos.y() >= TITLEBAR[3]:
+            return
+        dx = self._dx()
+        # Double-clicking the title bar (but not its buttons) toggles windowshade.
+        for r in (MENU, CLOSE.translated(dx, 0), MINIMIZE.translated(dx, 0),
+                  SHADE_BTN.translated(dx, 0)):
+            if r.contains(pos):
+                return
+        self._toggle_shade()
+
     def _set_volume_from_x(self, x):
         frac = (x - VOLUME.x()) / max(1, VOLUME.width() - VOL_HANDLE_W)
         self._set_volume(frac)
@@ -637,13 +665,17 @@ class SkinnedWindow(QWidget):
         elif name == 'prev':
             c.prev_song()   # local playback only; no-op for Pandora
         elif name == 'eject':
-            # Eject opens the station switcher, popped below the eject button.
-            s = self._scale()
-            for n, dx, dy, w, h, *_ in BUTTONS:
-                if n == 'eject':
-                    self._show_stations_menu(
-                        self.mapToGlobal(QPoint(int(dx * s), int((dy + h) * s))))
-                    break
+            # Winamp's Eject loads a file; in local mode open files, otherwise
+            # pop the station switcher below the eject button.
+            if c.local_mode:
+                c.open_local_files()
+            else:
+                s = self._scale()
+                for n, dx, dy, w, h, *_ in BUTTONS:
+                    if n == 'eject':
+                        self._show_stations_menu(
+                            self.mapToGlobal(QPoint(int(dx * s), int((dy + h) * s))))
+                        break
 
     def _populate_stations(self, menu):
         """Fill a menu with the user's stations; picking one switches to it."""
@@ -748,7 +780,15 @@ class SkinnedWindow(QWidget):
         return int(self._lw() * self._scale())   # stretches to the shell width
 
     def display_height(self):
-        return int(H * self._scale())   # the main panel never collapses
+        h = TITLEBAR[3] if self._collapsed else H   # windowshade → title bar only
+        return int(h * self._scale())
+
+    def _toggle_shade(self):
+        self._collapsed = not self._collapsed
+        shell = self.window()
+        if hasattr(shell, 'relayout'):
+            shell.relayout()
+        self.update()
 
     def closeEvent(self, event):
         # Only fires when used stand-alone; inside the shell the shell quits.

@@ -36,6 +36,13 @@ HMIN, HMAX = TITLE_H + 3 * ROW_H, 1400   # the playlist resizes vertically only
 FRAME_L, FRAME_R, FRAME_B = 12, 19, 38   # left / right / bottom insets
 SB_THUMB = (52, 53, 8, 18)               # scrollbar thumb sprite
 
+
+def _fmt_time(secs):
+    secs = int(secs)
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return '%d:%02d:%02d' % (h, m, s) if h else '%d:%02d' % (m, s)
+
 DEFAULTS = {
     'normal': '#00FF00', 'current': '#FFFFFF',
     'normalbg': '#000000', 'selectedbg': '#0000C6',
@@ -213,6 +220,14 @@ class SkinnedPlaylistWindow(QWidget):
             p.setPen(self.c_current if i == cur else self.c_normal)
             p.drawText(row.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
             y += ROW_H
+
+        # Track count + total duration in the bottom bar (Winamp shows time here).
+        if frame:
+            total = sum(int(s.get_duration_sec() or 0) for s in songs if s is not None)
+            label = '{} / {}'.format(len(songs), _fmt_time(total))
+            p.setPen(self.c_current)
+            p.drawText(QRect(li, lh - FRAME_B, w - li - 30, FRAME_B),
+                       Qt.AlignRight | Qt.AlignVCenter, label)
 
         # Resize grip (only without a frame; the frame has its own handle).
         if not frame:
