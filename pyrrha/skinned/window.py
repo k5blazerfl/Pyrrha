@@ -18,7 +18,7 @@ import os
 import time
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QRegion
 from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
 
 from .eqwindow import SkinnedEqWindow
@@ -27,6 +27,13 @@ from .playlistwindow import SkinnedPlaylistWindow
 
 W, H = 275, 116  # classic main-window native size
 WMAX = 1600      # max logical content width the shell can grow to
+SNAP_DIST = 12   # logical px within which a dragged panel snaps to another edge
+CANVAS_MAX = 4096  # fallback drag bound (device px) when no screen is available
+# Classic mode is a screen-sized, transparent, click-through overlay: the shell
+# window covers the whole screen, panels are positioned freely inside it (main at
+# its stored spot, EQ/playlist relative to main), and the window mask exposes only
+# the panels so the rest of the screen clicks through. This removes the old
+# reserved-room size ceiling — panels can be arranged anywhere on the screen.
 
 # The main window stretches by keeping a fixed left slice and a fixed
 # right-anchored slice, filling the inserted gap with the skin's own pixels.
@@ -731,12 +738,22 @@ class SkinnedWindow(QWidget):
                 self._seek_frac = self._seek_frac_from_x(pos.x())
                 self.update()
                 return
-        if pos.y() < TITLEBAR[3]:   # drag the whole shell by the title bar
-            handle = self.window().windowHandle()
-            if handle is not None:
-                handle.startSystemMove()   # compositor-driven move (Wayland/X11)
+        if pos.y() < TITLEBAR[3]:   # drag by the title bar
+            shell = self.window()
+            # Classic is a screen-sized overlay: dragging main moves the whole
+            # player (all panels) within it. Modern moves the shell window itself.
+            if getattr(shell, 'mode', 'modern') == 'classic':
+                self._titledrag = True
+                shell.start_free_drag(self, event.globalPosition().toPoint())
+            else:
+                handle = shell.windowHandle()
+                if handle is not None:
+                    handle.startSystemMove()   # compositor-driven move (Wayland/X11)
 
     def mouseMoveEvent(self, event):
+        if getattr(self, '_titledrag', False):
+            self.window().free_drag_move(self, event.globalPosition().toPoint())
+            return
         if self._vol_dragging:
             self._set_volume_from_x((event.position() / self._scale()).x())
         elif self._bal_dragging:
@@ -746,6 +763,10 @@ class SkinnedWindow(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, '_titledrag', False):
+            self._titledrag = False
+            self.window().end_free_drag()
+            return
         pos = event.position().toPoint()
         if self._pressed:
             if self._button_at(pos) == self._pressed:
@@ -977,6 +998,16 @@ class SkinnedShell(QWidget):
         self.mode = controller.get_skin_mode() if hasattr(controller, 'get_skin_mode') else 'modern'
         self.keep_above = False   # clutterbar "A" (KWin keep-above)
         self._activated_at = 0.0  # when the window last became active (click-to-focus)
+        # Classic tear-off layout: per-panel logical offsets inside the shell
+        # ({'eq': (x, y), 'pl': (x, y)}; main is the anchor, always at 0,0).
+        # Saved between runs. Free-drag state is set while a panel is torn off.
+        self._freelog, _mp = self._load_classic_layout()
+        self._mainpos = [_mp[0], _mp[1]] if _mp else [0.0, 0.0]  # main's logical pos in the overlay
+        self._prev_region = QRegion()  # previous masked area (to clear move trails)
+        self._fdrag = None        # panel currently being dragged
+        self._fgroup = False      # True while dragging main (moves the whole group)
+        self._fraw = None         # single-drag: un-snapped device position (avoids snap wobble)
+        self._flast = None        # last global cursor point (for delta tracking)
         # Classic mode uses the user's chosen skin; Modern always uses the
         # bundled Glare (the curated album-art experience).
         self._classic_skin = skin
@@ -986,12 +1017,11 @@ class SkinnedShell(QWidget):
         # Accept keyboard focus so the shell receives key presses (used by the
         # classic "nullsoft" easter egg); no child panel takes focus.
         self.setFocusPolicy(Qt.StrongFocus)
-        # Fills any area not covered by a panel (e.g. to the right of the
-        # fixed-width main/EQ when the playlist is dragged wider).
-        self.setAutoFillBackground(True)
-        pal = self.palette()
-        pal.setColor(self.backgroundRole(), Qt.black)
-        self.setPalette(pal)
+        # Translucent surface so the gaps around torn-off classic panels are
+        # genuinely see-through (setMask alone isn't honored visually on some
+        # Wayland compositors, which leaves black there). Modern paints its own
+        # black backdrop for any area a panel doesn't cover (see paintEvent).
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self.main = SkinnedWindow(controller, self.skin, parent=self)
         self.eq = SkinnedEqWindow(controller, self.skin, parent=self) if self.skin.has('eqmain.bmp') else None
@@ -1043,6 +1073,12 @@ class SkinnedShell(QWidget):
         self._repaint_panels()
 
     def relayout(self):
+        # Classic mode uses free tear-off offsets (panels can be pulled apart
+        # and magnetically re-snapped); Modern keeps the unified vertical stack.
+        if self.mode == 'classic':
+            self._classic_reflow()
+            return
+        self.clearMask()   # Modern is a solid rectangle (no torn-off gaps)
         panels = [p for p in (self.main, self.eq, self.pl)
                   if p is not None and not getattr(p, '_closed', False)]
         # Shared content width drives the stretchable panels (main + playlist)
@@ -1060,6 +1096,207 @@ class SkinnedShell(QWidget):
         self.setFixedSize(shell_w, y)
         for p in panels:
             p.update()
+
+    # ---------------------------------------------------- classic tear-off
+    def _classic_panels(self):
+        return [p for p in (self.main, self.eq, self.pl)
+                if p is not None and not getattr(p, '_closed', False)]
+
+    def _panel_role(self, p):
+        return 'main' if p is self.main else 'eq' if p is self.eq else 'pl'
+
+    def _load_classic_layout(self):
+        raw = self.ctl.get_classic_layout() if hasattr(self.ctl, 'get_classic_layout') else {}
+        out, mainpos = {}, None
+        for role in ('eq', 'pl'):
+            v = raw.get(role) if isinstance(raw, dict) else None
+            if isinstance(v, (list, tuple)) and len(v) == 2:
+                try:
+                    out[role] = (float(v[0]), float(v[1]))
+                except (TypeError, ValueError):
+                    pass
+        v = raw.get('main') if isinstance(raw, dict) else None
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            try:
+                mainpos = (float(v[0]), float(v[1]))
+            except (TypeError, ValueError):
+                pass
+        return out, mainpos
+
+    def _ensure_classic_defaults(self):
+        """Fill in offsets for panels the user hasn't torn off yet: the classic
+        main → EQ → playlist vertical stack. Offsets are logical pixels relative
+        to the main window's top-left (main itself is the 0,0 anchor)."""
+        s = self.scale
+        y = self.main.display_height() / s
+        if self.eq is not None:
+            self._freelog.setdefault('eq', (0.0, y))
+            y += self.eq.display_height() / s
+        if self.pl is not None:
+            self._freelog.setdefault('pl', (0.0, y))
+
+    def _avail_geom(self):
+        scr = self.screen() or QGuiApplication.primaryScreen()
+        return scr.availableGeometry() if scr is not None else None
+
+    def _overlay_size(self):
+        scr = self._avail_geom()
+        return (scr.width(), scr.height()) if scr is not None else (2000, 1500)
+
+    def _classic_reflow(self):
+        """Screen-sized overlay layout: size the shell to the whole screen, place
+        the main window at its stored spot and the EQ/playlist relative to it
+        (all clamped on-screen), and mask the window to just the panels so the
+        rest of the screen is transparent and clicks through."""
+        self._ensure_classic_defaults()
+        panels = self._classic_panels()
+        ow, oh = self._overlay_size()
+        self.setFixedSize(ow, oh)
+        s = self.scale
+        mpx, mpy = round(self._mainpos[0] * s), round(self._mainpos[1] * s)
+        region = QRegion()
+        for p in panels:
+            p._is_bottom = (p is self.pl)   # the playlist keeps its resize grip
+            p.setFixedSize(p.display_width(), p.display_height())
+            if p is self.main:
+                x, y = mpx, mpy
+            else:
+                rx, ry = self._freelog.get(self._panel_role(p), (0.0, 0.0))
+                x, y = mpx + round(rx * s), mpy + round(ry * s)
+            x = max(0, min(ow - p.width(), x))
+            y = max(0, min(oh - p.height(), y))
+            p.move(x, y)
+            p.setVisible(True)
+            region += QRegion(x, y, p.width(), p.height())
+        # setMask clips both input *and* our own painting, so we can only clear
+        # pixels inside the mask — a panel that moved leaves its old pixels behind
+        # (outside the new mask) as a trail. So temporarily widen the mask to the
+        # union of the previous and current panel areas, synchronously repaint it
+        # (paintEvent clears the just-vacated strip to transparent), then tighten
+        # the mask back to the panels for a clean input/visible region.
+        vacated = QRegion(self._prev_region)
+        vacated -= region                       # area a panel just left behind
+        self._prev_region = QRegion(region)
+        for p in panels:
+            p.update()
+        if vacated.isEmpty():
+            # Nothing to erase (startup / in-place change): just set the mask.
+            # Dropping it here would briefly unmask the whole screen and flash.
+            self.setMask(region)
+        else:
+            # Painting is clipped to the current mask, so the vacated strip can't
+            # be cleared through it. Drop the mask, synchronously repaint the old
+            # + new area (paintEvent clears it to transparent), then restore the
+            # panels-only mask for click-through.
+            self.clearMask()
+            self.repaint(region + vacated)
+            self.setMask(region)
+
+    def _apply_snap(self, moving, pos):
+        """Nudge a candidate device position so the moving panel's edges snap to
+        a nearby panel's edges (magnetic docking). Chooses the closest snap per
+        axis within SNAP_DIST."""
+        thr = SNAP_DIST * self.scale
+        mv = QRect(pos, moving.size())
+        best_dx = best_dy = 0
+        near_dx = near_dy = thr + 1
+        for o in self._classic_panels():
+            if o is moving:
+                continue
+            r = o.geometry()
+            # X snap only makes sense when the panels overlap vertically.
+            if not (mv.bottom() < r.top() - thr or mv.top() > r.bottom() + thr):
+                for m, e in ((mv.left(), r.left()), (mv.left(), r.right() + 1),
+                             (mv.right() + 1, r.left()), (mv.right() + 1, r.right() + 1)):
+                    d = e - m
+                    if abs(d) <= thr and abs(d) < near_dx:
+                        near_dx, best_dx = abs(d), d
+            # Y snap only when they overlap horizontally.
+            if not (mv.right() < r.left() - thr or mv.left() > r.right() + thr):
+                for m, e in ((mv.top(), r.top()), (mv.top(), r.bottom() + 1),
+                             (mv.bottom() + 1, r.top()), (mv.bottom() + 1, r.bottom() + 1)):
+                    d = e - m
+                    if abs(d) <= thr and abs(d) < near_dy:
+                        near_dy, best_dy = abs(d), d
+        return QPoint(pos.x() + best_dx, pos.y() + best_dy)
+
+    def start_free_drag(self, panel, global_pos):
+        """Begin dragging a panel inside the screen-sized classic overlay.
+        Dragging the main window moves the whole group; the EQ/playlist tear off
+        individually and snap. Classic mode only."""
+        if self.mode != 'classic':
+            return
+        self._fdrag = panel
+        self._flast = QPoint(global_pos)
+        self._fgroup = (panel is self.main)
+        if not self._fgroup:
+            self._fraw = QPoint(panel.pos())
+            panel.raise_()
+
+    def free_drag_move(self, panel, global_pos):
+        if self._fdrag is not panel:
+            return
+        delta = QPoint(global_pos) - self._flast
+        self._flast = QPoint(global_pos)
+        if self._fgroup:
+            self._group_move(delta)
+        else:
+            self._single_move(panel, delta)
+
+    def _group_move(self, delta):
+        """Move the whole player (all panels) by ``delta`` device px, clamped so
+        the group stays fully on-screen."""
+        panels = self._classic_panels()
+        dx, dy = delta.x(), delta.y()
+        scr = self._avail_geom()
+        if scr is not None:
+            minx = min(p.x() for p in panels)
+            miny = min(p.y() for p in panels)
+            maxr = max(p.x() + p.width() for p in panels)
+            maxb = max(p.y() + p.height() for p in panels)
+            dx = max(-minx, min(scr.width() - maxr, dx))
+            dy = max(-miny, min(scr.height() - maxb, dy))
+        s = self.scale
+        self._mainpos[0] += dx / s
+        self._mainpos[1] += dy / s
+        self._classic_reflow()
+
+    def _single_move(self, panel, delta):
+        """Tear off / move one panel, snapping to the others and clamped on-screen."""
+        self._fraw += delta
+        scr = self._avail_geom()
+        hix = (scr.width() - panel.width()) if scr is not None else CANVAS_MAX
+        hiy = (scr.height() - panel.height()) if scr is not None else CANVAS_MAX
+        self._fraw.setX(max(0, min(hix, self._fraw.x())))
+        self._fraw.setY(max(0, min(hiy, self._fraw.y())))
+        snapped = self._apply_snap(panel, self._fraw)
+        s = self.scale
+        mpx, mpy = round(self._mainpos[0] * s), round(self._mainpos[1] * s)
+        self._freelog[self._panel_role(panel)] = (
+            (snapped.x() - mpx) / s, (snapped.y() - mpy) / s)
+        self._classic_reflow()
+
+    def end_free_drag(self):
+        self._fdrag = self._fraw = self._flast = None
+        self._fgroup = False
+        if hasattr(self.ctl, 'set_classic_layout'):
+            data = {k: [v[0], v[1]] for k, v in self._freelog.items()}
+            data['main'] = [self._mainpos[0], self._mainpos[1]]
+            self.ctl.set_classic_layout(data)
+
+    def paintEvent(self, event):
+        # The shell surface is translucent; Modern wants a black backdrop behind
+        # any area a panel doesn't cover. Classic is the screen-sized overlay:
+        # actively clear to *fully* transparent (Source mode zeroes the alpha —
+        # a normal transparent fill would composite to nothing and leave the old
+        # pixels), erasing the trails left when panels move.
+        p = QPainter(self)
+        if self.mode == 'classic':
+            p.setCompositionMode(QPainter.CompositionMode_Source)
+            p.fillRect(event.rect(), Qt.transparent)
+        else:
+            p.fillRect(self.rect(), Qt.black)
+        p.end()
 
     def set_content_width(self, logical_w):
         self.content_w = max(W, min(self._max_content_w(), int(logical_w)))

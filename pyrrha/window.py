@@ -1453,6 +1453,27 @@ class PyrrhaWindow(QMainWindow):
         except IOError:
             logging.warning('Failed to save the last skin path')
 
+    def _classic_layout_file(self):
+        d = os.path.join(GLib.get_user_config_dir(), 'pyrrha')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'skin_layout.json')
+
+    def get_classic_layout(self):
+        """Saved tear-off offsets for the classic panels: {role: [x, y]} in
+        logical pixels (empty on first run)."""
+        try:
+            with open(self._classic_layout_file()) as f:
+                return json.load(f)
+        except (IOError, ValueError):
+            return {}
+
+    def set_classic_layout(self, layout):
+        try:
+            with open(self._classic_layout_file(), 'w') as f:
+                json.dump(layout, f)
+        except IOError:
+            logging.warning('Failed to save the classic skin layout')
+
     def skins_dir(self):
         return os.path.join(GLib.get_user_data_dir(), 'pyrrha', 'skins')
 

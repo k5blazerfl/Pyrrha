@@ -396,9 +396,16 @@ class SkinnedEqWindow(QWidget):
             self._drag = i
             self._set_from_y(i, pos.y())
         elif pos.y() < TITLE_H:
-            handle = self.window().windowHandle()
-            if handle is not None:
-                handle.startSystemMove()
+            shell = self.window()
+            # Classic: tear the EQ off the stack (magnetically re-snaps). Modern:
+            # the panels are one unit, so drag the whole shell via the compositor.
+            if getattr(shell, 'mode', 'modern') == 'classic':
+                self._titledrag = True
+                shell.start_free_drag(self, event.globalPosition().toPoint())
+            else:
+                handle = shell.windowHandle()
+                if handle is not None:
+                    handle.startSystemMove()
 
     def contextMenuEvent(self, event):
         self._show_presets_menu(event.globalPos())   # right-click -> presets
@@ -407,10 +414,17 @@ class SkinnedEqWindow(QWidget):
         self.window().wheelEvent(event)               # scroll -> volume
 
     def mouseMoveEvent(self, event):
+        if getattr(self, '_titledrag', False):
+            self.window().free_drag_move(self, event.globalPosition().toPoint())
+            return
         if self._drag is not None:
             self._set_from_y(self._drag, (event.position() / self._scale()).y())
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, '_titledrag', False):
+            self._titledrag = False
+            self.window().end_free_drag()
+            return
         if self._drag is not None:       # a band/preamp drag just finished
             self._drag = None
             self._save_station_eq()

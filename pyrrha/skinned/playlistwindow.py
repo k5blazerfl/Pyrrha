@@ -301,9 +301,16 @@ class SkinnedPlaylistWindow(QWidget):
             self._toggle_collapse()
             return
         if pos.y() < TITLE_H:
-            handle = self.window().windowHandle()
-            if handle is not None:
-                handle.startSystemMove()
+            shell = self.window()
+            # Classic: tear the playlist off the stack (magnetically re-snaps).
+            # Modern: drag the whole shell via the compositor.
+            if getattr(shell, 'mode', 'modern') == 'classic':
+                self._titledrag = True
+                shell.start_free_drag(self, event.globalPosition().toPoint())
+            else:
+                handle = shell.windowHandle()
+                if handle is not None:
+                    handle.startSystemMove()
 
     def contextMenuEvent(self, event):
         if self._collapsed:
@@ -335,6 +342,9 @@ class SkinnedPlaylistWindow(QWidget):
         menu.exec(event.globalPos())
 
     def mouseMoveEvent(self, event):
+        if getattr(self, '_titledrag', False):
+            self.window().free_drag_move(self, event.globalPosition().toPoint())
+            return
         if self._resizing:
             # Drag the corner: vertical only. Classic mode stays native width;
             # modern width is driven by the double-click album-art widen.
@@ -345,6 +355,10 @@ class SkinnedPlaylistWindow(QWidget):
             self.window().relayout()
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, '_titledrag', False):
+            self._titledrag = False
+            self.window().end_free_drag()
+            return
         self._resizing = False
 
     def wheelEvent(self, event):
