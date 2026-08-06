@@ -111,6 +111,10 @@ class Settings(QObject):
 
     def __setitem__(self, key, value):
         self._q.setValue(self._full(key), value)
+        # Flush immediately so a change survives a non-graceful exit (kill,
+        # crash, logout) — QSettings otherwise only writes on sync()/destruction,
+        # and aboutToQuit does not fire on SIGTERM. Syncing a small INI is cheap.
+        self._q.sync()
         self.changed.emit(key)
 
     # Typed writers kept for call-site compatibility with Gio.Settings.
