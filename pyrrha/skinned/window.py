@@ -35,6 +35,38 @@ CANVAS_MAX = 4096  # fallback drag bound (device px) when no screen is available
 # the panels so the rest of the screen clicks through. This removes the old
 # reserved-room size ceiling — panels can be arranged anywhere on the screen.
 
+# A Wayland client cannot position its own top-level window (Qt move() is a
+# no-op), and KWin re-anchors the top-left on every client-driven resize. So
+# after a mode switch resizes the shell, we ask KWin to place the window
+# explicitly via a one-shot scripting call (verified ~1ms on KWin). The script
+# matches our window by PID + caption 'Pyrrha': while the skinned shell is up the
+# standard window is hidden (unmapped, so absent from KWin's list) and the EQ/
+# playlist are child widgets, so the shell is the sole mapped 'Pyrrha' top-level.
+# KDE-only; on anything else the D-Bus call simply fails and is ignored.
+_KWIN_MOVE_JS = """(function () {
+    var PID = %(pid)d, X = %(x)d, Y = %(y)d, W = %(w)d, H = %(h)d;
+    var list = (typeof workspace.windowList === "function")
+        ? workspace.windowList()
+        : (typeof workspace.clientList === "function" ? workspace.clientList() : []);
+    function place(c) {
+        var r = { x: X, y: Y, width: W, height: H };
+        try { c.frameGeometry = r; return true; } catch (e) {}
+        try { c.geometry = r; return true; } catch (e) {}
+        return false;
+    }
+    var fallback = null;
+    for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        try {
+            if (c.pid !== PID) continue;
+            if (c.caption === "Pyrrha") { place(c); return; }
+            if (fallback === null) fallback = c;
+        } catch (e) {}
+    }
+    if (fallback !== null) place(fallback);
+})();
+"""
+
 # The main window stretches by keeping a fixed left slice and a fixed
 # right-anchored slice, filling the inserted gap with the skin's own pixels.
 SPLIT = 219      # width of the left slice kept as-is (right slice = W-SPLIT)
@@ -998,15 +1030,17 @@ class SkinnedShell(QWidget):
         self.mode = controller.get_skin_mode() if hasattr(controller, 'get_skin_mode') else 'modern'
         self.keep_above = False   # clutterbar "A" (KWin keep-above)
         self._activated_at = 0.0  # when the window last became active (click-to-focus)
-        # Classic tear-off layout: per-panel logical offsets inside the shell
-        # ({'eq': (x, y), 'pl': (x, y)}; main is the anchor, always at 0,0).
-        # Saved between runs. Free-drag state is set while a panel is torn off.
-        self._freelog, _mp = self._load_classic_layout()
-        self._mainpos = [_mp[0], _mp[1]] if _mp else [0.0, 0.0]  # main's logical pos in the overlay
+        # Classic tear-off layout: each panel's *absolute* logical position inside
+        # the screen-sized overlay ({'main'|'eq'|'pl': [x, y]}). Absolute (not
+        # relative to main) so a torn-off panel stays put when the main window is
+        # dragged; a main drag only carries the panels docked (edge-adjacent) to
+        # it. Saved between runs. Free-drag state is set while a panel is dragged.
+        self._pos = self._load_classic_layout()
         self._prev_region = QRegion()  # previous masked area (to clear move trails)
         self._fdrag = None        # panel currently being dragged
-        self._fgroup = False      # True while dragging main (moves the whole group)
-        self._fraw = None         # single-drag: un-snapped device position (avoids snap wobble)
+        self._fset = set()        # panels moving with it (the dragged panel's dock subtree)
+        self._foff = {}           # each moving panel's device offset from the dragged one
+        self._fraw = None         # dragged panel's un-snapped device pos (avoids snap wobble)
         self._flast = None        # last global cursor point (for delta tracking)
         # Classic mode uses the user's chosen skin; Modern always uses the
         # bundled Glare (the curated album-art experience).
@@ -1061,6 +1095,13 @@ class SkinnedShell(QWidget):
         """Switch between 'classic' (faithful) and 'modern' (album-art) skins."""
         if mode not in ('classic', 'modern') or mode == self.mode:
             return
+        # Where the player sits on screen right now (top-left of the main panel).
+        # Classic positions the player by offsetting the child inside a full-screen
+        # overlay; Modern by moving the whole (small) window. Switching resizes the
+        # top-level, which KWin re-anchors, so we re-place it below to keep the
+        # player put: Classic returns to a (0,0) full-screen overlay (its saved
+        # layout drives the panel spot), Modern lands where the player just was.
+        old_player = self.main.mapToGlobal(QPoint(0, 0)) if self.main is not None else None
         self.mode = mode
         self.content_w = W
         if mode == 'modern':
@@ -1071,6 +1112,72 @@ class SkinnedShell(QWidget):
             self.ctl.set_skin_mode(mode)
         self.relayout()
         self._repaint_panels()
+        if mode == 'classic':
+            scr = self._avail_geom()
+            tx, ty = (scr.x(), scr.y()) if scr is not None else (0, 0)
+        elif old_player is not None:
+            tx, ty = self._clamp_on_screen(old_player.x(), old_player.y())
+        else:
+            return
+        # Let the resize commit before repositioning: KWin re-anchors the
+        # top-left while a resize is in flight and can defeat a move issued too
+        # early (the move only sticks "when not resizing"). A couple of frames is
+        # imperceptible and reliably clears the pending configure.
+        QTimer.singleShot(50, lambda: self._kwin_reposition(tx, ty))
+
+    def _clamp_on_screen(self, x, y):
+        """Clamp a desired top-left so the current window stays fully on-screen."""
+        scr = self._avail_geom()
+        if scr is None:
+            return x, y
+        x = max(scr.x(), min(scr.x() + scr.width() - self.width(), x))
+        y = max(scr.y(), min(scr.y() + scr.height() - self.height(), y))
+        return x, y
+
+    def _kwin_reposition(self, x, y):
+        """Ask KWin to move this top-level to screen (x, y). Qt move() is a no-op
+        for a Wayland client, so we drive a one-shot KWin script (see
+        _KWIN_MOVE_JS). KDE-only; failures elsewhere are logged and ignored."""
+        try:
+            from gi.repository import Gio, GLib
+        except Exception:
+            return
+        js = _KWIN_MOVE_JS % {'pid': os.getpid(), 'x': int(x), 'y': int(y),
+                              'w': int(self.width()), 'h': int(self.height())}
+        path = None
+        try:
+            import tempfile
+            fd, path = tempfile.mkstemp(suffix='.js', prefix='pyrrha-kwin-')
+            with os.fdopen(fd, 'w') as f:
+                f.write(js)
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            res = bus.call_sync(
+                'org.kde.KWin', '/Scripting', 'org.kde.kwin.Scripting',
+                'loadScript', GLib.Variant('(ss)', (path, 'pyrrha-move-%d' % int(time.monotonic() * 1000))),
+                GLib.VariantType('(i)'), Gio.DBusCallFlags.NONE, 2000, None)
+            sid = res.unpack()[0]
+            for obj in ('/Scripting/Script%d' % sid, '/%d' % sid):
+                try:
+                    bus.call_sync('org.kde.KWin', obj, 'org.kde.kwin.Script',
+                                  'run', None, None, Gio.DBusCallFlags.NONE, 2000, None)
+                    try:
+                        bus.call_sync('org.kde.KWin', obj, 'org.kde.kwin.Script',
+                                      'stop', None, None, Gio.DBusCallFlags.NONE, 2000, None)
+                    except GLib.Error:
+                        pass
+                    break
+                except GLib.Error:
+                    continue
+        except GLib.Error as e:
+            logging.debug('KWin reposition unavailable (non-KDE?): %s', e)
+        except Exception as e:
+            logging.debug('KWin reposition failed: %s', e)
+        finally:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def relayout(self):
         # Classic mode uses free tear-off offsets (panels can be pulled apart
@@ -1106,34 +1213,52 @@ class SkinnedShell(QWidget):
         return 'main' if p is self.main else 'eq' if p is self.eq else 'pl'
 
     def _load_classic_layout(self):
+        """Load saved absolute panel positions. v2 files store each panel's
+        absolute overlay position directly; legacy files stored 'main' plus
+        eq/pl as offsets *relative* to main — migrate those to absolute here."""
         raw = self.ctl.get_classic_layout() if hasattr(self.ctl, 'get_classic_layout') else {}
-        out, mainpos = {}, None
-        for role in ('eq', 'pl'):
-            v = raw.get(role) if isinstance(raw, dict) else None
+        if not isinstance(raw, dict):
+            return {}
+
+        def _xy(v):
             if isinstance(v, (list, tuple)) and len(v) == 2:
                 try:
-                    out[role] = (float(v[0]), float(v[1]))
+                    return [float(v[0]), float(v[1])]
                 except (TypeError, ValueError):
-                    pass
-        v = raw.get('main') if isinstance(raw, dict) else None
-        if isinstance(v, (list, tuple)) and len(v) == 2:
-            try:
-                mainpos = (float(v[0]), float(v[1]))
-            except (TypeError, ValueError):
-                pass
-        return out, mainpos
+                    return None
+            return None
+
+        # Stored positions are scale-independent (device px at 1x); scale to the
+        # current device size. Legacy files stored eq/pl as offsets relative to
+        # main (also at 1x) — resolve to absolute before scaling.
+        s = self.scale
+        pos = {}
+        main = _xy(raw.get('main'))
+        if main is not None:
+            pos['main'] = [main[0] * s, main[1] * s]
+        legacy = raw.get('version') != 2   # old files carried no version
+        for role in ('eq', 'pl'):
+            v = _xy(raw.get(role))
+            if v is None:
+                continue
+            if legacy and main is not None:
+                pos[role] = [(main[0] + v[0]) * s, (main[1] + v[1]) * s]
+            elif not legacy:
+                pos[role] = [v[0] * s, v[1] * s]
+        return pos
 
     def _ensure_classic_defaults(self):
-        """Fill in offsets for panels the user hasn't torn off yet: the classic
-        main → EQ → playlist vertical stack. Offsets are logical pixels relative
-        to the main window's top-left (main itself is the 0,0 anchor)."""
-        s = self.scale
-        y = self.main.display_height() / s
+        """Fill in absolute device positions for panels the user hasn't torn off
+        yet: the classic main → EQ → playlist vertical stack, anchored at main's
+        current spot (main defaults to the overlay origin)."""
+        self._pos.setdefault('main', [0.0, 0.0])
+        mx, my = self._pos['main']
+        y = my + self.main.display_height()
         if self.eq is not None:
-            self._freelog.setdefault('eq', (0.0, y))
-            y += self.eq.display_height() / s
+            self._pos.setdefault('eq', [mx, y])
+            y += self.eq.display_height()
         if self.pl is not None:
-            self._freelog.setdefault('pl', (0.0, y))
+            self._pos.setdefault('pl', [mx, y])
 
     def _avail_geom(self):
         scr = self.screen() or QGuiApplication.primaryScreen()
@@ -1145,24 +1270,20 @@ class SkinnedShell(QWidget):
 
     def _classic_reflow(self):
         """Screen-sized overlay layout: size the shell to the whole screen, place
-        the main window at its stored spot and the EQ/playlist relative to it
-        (all clamped on-screen), and mask the window to just the panels so the
-        rest of the screen is transparent and clicks through."""
+        each panel at its stored absolute device position (clamped on-screen),
+        and mask the window to just the panels so the rest of the screen is
+        transparent and clicks through. Positions are device px, so scaling is
+        handled up front in set_scale rather than by multiplying here."""
         self._ensure_classic_defaults()
         panels = self._classic_panels()
         ow, oh = self._overlay_size()
         self.setFixedSize(ow, oh)
-        s = self.scale
-        mpx, mpy = round(self._mainpos[0] * s), round(self._mainpos[1] * s)
         region = QRegion()
         for p in panels:
             p._is_bottom = (p is self.pl)   # the playlist keeps its resize grip
             p.setFixedSize(p.display_width(), p.display_height())
-            if p is self.main:
-                x, y = mpx, mpy
-            else:
-                rx, ry = self._freelog.get(self._panel_role(p), (0.0, 0.0))
-                x, y = mpx + round(rx * s), mpy + round(ry * s)
+            px, py = self._pos.get(self._panel_role(p), (0.0, 0.0))
+            x, y = round(px), round(py)
             x = max(0, min(ow - p.width(), x))
             y = max(0, min(oh - p.height(), y))
             p.move(x, y)
@@ -1192,96 +1313,155 @@ class SkinnedShell(QWidget):
             self.repaint(region + vacated)
             self.setMask(region)
 
-    def _apply_snap(self, moving, pos):
-        """Nudge a candidate device position so the moving panel's edges snap to
-        a nearby panel's edges (magnetic docking). Chooses the closest snap per
-        axis within SNAP_DIST."""
+    def _apply_snap_set(self, dragged_pos):
+        """Nudge the dragged panel's candidate position so any panel in the
+        moving set snaps its edges to a panel *outside* the set (magnetic
+        docking). Chooses the closest snap per axis within SNAP_DIST and returns
+        the adjusted position of the dragged panel."""
         thr = SNAP_DIST * self.scale
-        mv = QRect(pos, moving.size())
+        externals = [o for o in self._classic_panels() if o not in self._fset]
         best_dx = best_dy = 0
         near_dx = near_dy = thr + 1
-        for o in self._classic_panels():
-            if o is moving:
-                continue
-            r = o.geometry()
-            # X snap only makes sense when the panels overlap vertically.
-            if not (mv.bottom() < r.top() - thr or mv.top() > r.bottom() + thr):
-                for m, e in ((mv.left(), r.left()), (mv.left(), r.right() + 1),
-                             (mv.right() + 1, r.left()), (mv.right() + 1, r.right() + 1)):
-                    d = e - m
-                    if abs(d) <= thr and abs(d) < near_dx:
-                        near_dx, best_dx = abs(d), d
-            # Y snap only when they overlap horizontally.
-            if not (mv.right() < r.left() - thr or mv.left() > r.right() + thr):
-                for m, e in ((mv.top(), r.top()), (mv.top(), r.bottom() + 1),
-                             (mv.bottom() + 1, r.top()), (mv.bottom() + 1, r.bottom() + 1)):
-                    d = e - m
-                    if abs(d) <= thr and abs(d) < near_dy:
-                        near_dy, best_dy = abs(d), d
-        return QPoint(pos.x() + best_dx, pos.y() + best_dy)
+        for m in self._fset:
+            off = self._foff[self._panel_role(m)]
+            mv = QRect(QPoint(dragged_pos.x() + off.x(), dragged_pos.y() + off.y()), m.size())
+            for o in externals:
+                r = o.geometry()
+                # X snap only makes sense when the panels overlap vertically.
+                if not (mv.bottom() < r.top() - thr or mv.top() > r.bottom() + thr):
+                    for a, e in ((mv.left(), r.left()), (mv.left(), r.right() + 1),
+                                 (mv.right() + 1, r.left()), (mv.right() + 1, r.right() + 1)):
+                        d = e - a
+                        if abs(d) <= thr and abs(d) < near_dx:
+                            near_dx, best_dx = abs(d), d
+                # Y snap only when they overlap horizontally.
+                if not (mv.right() < r.left() - thr or mv.left() > r.right() + thr):
+                    for a, e in ((mv.top(), r.top()), (mv.top(), r.bottom() + 1),
+                                 (mv.bottom() + 1, r.top()), (mv.bottom() + 1, r.bottom() + 1)):
+                        d = e - a
+                        if abs(d) <= thr and abs(d) < near_dy:
+                            near_dy, best_dy = abs(d), d
+        return QPoint(dragged_pos.x() + best_dx, dragged_pos.y() + best_dy)
 
     def start_free_drag(self, panel, global_pos):
-        """Begin dragging a panel inside the screen-sized classic overlay.
-        Dragging the main window moves the whole group; the EQ/playlist tear off
-        individually and snap. Classic mode only."""
+        """Begin dragging a panel inside the screen-sized classic overlay. The
+        dragged panel carries its dock subtree (see _drag_set): dragging main
+        moves the whole player, dragging a sub-window moves it and anything
+        docked below it (tearing off from main). Classic mode only."""
         if self.mode != 'classic':
             return
         self._fdrag = panel
         self._flast = QPoint(global_pos)
-        self._fgroup = (panel is self.main)
-        if not self._fgroup:
-            self._fraw = QPoint(panel.pos())
-            panel.raise_()
+        self._fset = self._drag_set(panel)
+        base = panel.pos()
+        self._foff = {self._panel_role(p): (p.pos() - base) for p in self._fset}
+        self._fraw = QPoint(base)
+        for p in self._fset:
+            p.raise_()
 
     def free_drag_move(self, panel, global_pos):
         if self._fdrag is not panel:
             return
         delta = QPoint(global_pos) - self._flast
         self._flast = QPoint(global_pos)
-        if self._fgroup:
-            self._group_move(delta)
-        else:
-            self._single_move(panel, delta)
-
-    def _group_move(self, delta):
-        """Move the whole player (all panels) by ``delta`` device px, clamped so
-        the group stays fully on-screen."""
-        panels = self._classic_panels()
-        dx, dy = delta.x(), delta.y()
+        self._fraw += delta
+        # Clamp so the whole moving set stays on-screen (relative to the dragged
+        # panel, whose position is self._fraw).
         scr = self._avail_geom()
         if scr is not None:
-            minx = min(p.x() for p in panels)
-            miny = min(p.y() for p in panels)
-            maxr = max(p.x() + p.width() for p in panels)
-            maxb = max(p.y() + p.height() for p in panels)
-            dx = max(-minx, min(scr.width() - maxr, dx))
-            dy = max(-miny, min(scr.height() - maxb, dy))
-        s = self.scale
-        self._mainpos[0] += dx / s
-        self._mainpos[1] += dy / s
+            offs = [self._foff[self._panel_role(p)] for p in self._fset]
+            minx = min(o.x() for o in offs)
+            miny = min(o.y() for o in offs)
+            maxx = max(self._foff[self._panel_role(p)].x() + p.width() for p in self._fset)
+            maxy = max(self._foff[self._panel_role(p)].y() + p.height() for p in self._fset)
+            self._fraw.setX(max(-minx, min(scr.width() - maxx, self._fraw.x())))
+            self._fraw.setY(max(-miny, min(scr.height() - maxy, self._fraw.y())))
+        snapped = self._apply_snap_set(self._fraw)
+        for p in self._fset:
+            off = self._foff[self._panel_role(p)]
+            self._pos[self._panel_role(p)] = [snapped.x() + off.x(), snapped.y() + off.y()]
         self._classic_reflow()
 
-    def _single_move(self, panel, delta):
-        """Tear off / move one panel, snapping to the others and clamped on-screen."""
-        self._fraw += delta
-        scr = self._avail_geom()
-        hix = (scr.width() - panel.width()) if scr is not None else CANVAS_MAX
-        hiy = (scr.height() - panel.height()) if scr is not None else CANVAS_MAX
-        self._fraw.setX(max(0, min(hix, self._fraw.x())))
-        self._fraw.setY(max(0, min(hiy, self._fraw.y())))
-        snapped = self._apply_snap(panel, self._fraw)
-        s = self.scale
-        mpx, mpy = round(self._mainpos[0] * s), round(self._mainpos[1] * s)
-        self._freelog[self._panel_role(panel)] = (
-            (snapped.x() - mpx) / s, (snapped.y() - mpy) / s)
-        self._classic_reflow()
+    def _are_adjacent(self, a, b):
+        """True if panels a and b share a flush (touching) edge — i.e. they are
+        docked. Uses current device geometry with a couple of px of slack."""
+        ra, rb = a.geometry(), b.geometry()
+        tol = 2
+        v_overlap = min(ra.bottom(), rb.bottom()) - max(ra.top(), rb.top())
+        h_overlap = min(ra.right(), rb.right()) - max(ra.left(), rb.left())
+        # Side by side (shared vertical edge), overlapping vertically.
+        if v_overlap > 0 and (abs(ra.right() + 1 - rb.left()) <= tol
+                              or abs(rb.right() + 1 - ra.left()) <= tol):
+            return True
+        # Stacked (shared horizontal edge), overlapping horizontally.
+        if h_overlap > 0 and (abs(ra.bottom() + 1 - rb.top()) <= tol
+                              or abs(rb.bottom() + 1 - ra.top()) <= tol):
+            return True
+        return False
+
+    def _docked_group(self, root):
+        """The set of panels docked to ``root``, directly or transitively (a
+        connected component under edge-adjacency). Undocked panels are excluded
+        so a main-window drag leaves torn-off panels where they are."""
+        panels = self._classic_panels()
+        group = [root]
+        seen = {root}
+        i = 0
+        while i < len(group):
+            cur = group[i]
+            i += 1
+            for p in panels:
+                if p not in seen and self._are_adjacent(cur, p):
+                    seen.add(p)
+                    group.append(p)
+        return group
+
+    def _drag_set(self, panel):
+        """Panels that move when ``panel`` is dragged: it plus its descendants in
+        the dock tree. The tree is rooted at main (so sub-windows tear off main
+        instead of dragging it) or, for a cluster with no main, at its top-left-
+        most panel. So dragging main moves everything docked to it, dragging a
+        middle window carries what hangs below it, and dragging a leaf moves only
+        itself."""
+        comp = self._docked_group(panel)
+        if len(comp) <= 1:
+            return set(comp)
+        if self.main in comp:
+            root = self.main
+        else:
+            root = min(comp, key=lambda p: (self._pos[self._panel_role(p)][1],
+                                            self._pos[self._panel_role(p)][0]))
+        parent = {root: None}
+        queue = [root]
+        while queue:
+            cur = queue.pop(0)
+            for p in comp:
+                if p not in parent and self._are_adjacent(cur, p):
+                    parent[p] = cur
+                    queue.append(p)
+        children = {}
+        for node, par in parent.items():
+            if par is not None:
+                children.setdefault(par, []).append(node)
+        result, stack = set(), [panel]
+        while stack:
+            cur = stack.pop()
+            if cur in result:
+                continue
+            result.add(cur)
+            stack.extend(children.get(cur, ()))
+        return result
 
     def end_free_drag(self):
         self._fdrag = self._fraw = self._flast = None
-        self._fgroup = False
+        self._fset = set()
+        self._foff = {}
         if hasattr(self.ctl, 'set_classic_layout'):
-            data = {k: [v[0], v[1]] for k, v in self._freelog.items()}
-            data['main'] = [self._mainpos[0], self._mainpos[1]]
+            # Persist scale-independent (1x device) positions so the layout
+            # reloads correctly regardless of the scale in effect when saved.
+            s = self.scale or 1.0
+            data = {role: [xy[0] / s, xy[1] / s] for role, xy in self._pos.items()}
+            data['version'] = 2   # absolute positions (see _load_classic_layout)
             self.ctl.set_classic_layout(data)
 
     def paintEvent(self, event):
@@ -1342,11 +1522,37 @@ class SkinnedShell(QWidget):
         self.set_content_width(W if self.content_w > W else W + H)
 
     def set_scale(self, scale):
-        self.scale = max(1.0, min(4.0, scale))
+        scale = max(1.0, min(4.0, scale))
+        if self.mode == 'classic' and abs(scale - self.scale) > 1e-6:
+            self._rescale_positions(self.scale, scale)
+        self.scale = scale
         self.relayout()
         for panel in (self.main, self.eq, self.pl):
             if panel is not None:
                 panel.update()
+
+    def _rescale_positions(self, s0, s1):
+        """Grow/shrink the classic layout in place when the UI scale changes.
+        Each docked cluster is scaled about its anchor so it grows from that
+        corner and stays docked: the main cluster anchors on the main window;
+        any torn-off cluster on its own top-left-most panel. Call before
+        updating self.scale (adjacency is read from the current geometry)."""
+        ratio = s1 / s0
+        visited = set()
+        for start in self._classic_panels():
+            if start in visited:
+                continue
+            comp = self._docked_group(start)
+            visited.update(comp)
+            if self.main in comp:
+                anchor = self.main
+            else:
+                anchor = min(comp, key=lambda p: tuple(self._pos[self._panel_role(p)][::-1]))
+            ax, ay = self._pos[self._panel_role(anchor)]
+            for p in comp:
+                role = self._panel_role(p)
+                px, py = self._pos[role]
+                self._pos[role] = [ax + (px - ax) * ratio, ay + (py - ay) * ratio]
 
     def toggle_scale(self):
         self.set_scale(2 if self.scale == 1 else 1)
