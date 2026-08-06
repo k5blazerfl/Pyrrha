@@ -360,8 +360,6 @@ class PyrrhaWindow(QMainWindow):
         """Register the Winamp-skinned shell so the two views can toggle."""
         self.skinned_shell = shell
         self._skinned_active = shell is not None
-        if getattr(self, '_skin_action', None) is not None:
-            self._skin_action.setVisible(shell is not None)
 
     def active_view(self):
         """The widget currently serving as the player (skinned shell or native)."""
@@ -396,8 +394,9 @@ class PyrrhaWindow(QMainWindow):
         self.activateWindow()
 
     def show_skinned_view(self):
-        """Switch from the standard window to the skinned UI."""
-        if self.skinned_shell is None:
+        """Switch from the standard window to the skinned UI, building the
+        skinned shell on first use."""
+        if self.skinned_shell is None and not self._build_skinned_shell():
             return
         self._skinned_active = True
         self.hide()
@@ -405,13 +404,40 @@ class PyrrhaWindow(QMainWindow):
         self.skinned_shell.raise_()
         self.skinned_shell.activateWindow()
 
+    def _build_skinned_shell(self):
+        """Create the Winamp-skinned shell on demand from the last-used skin, or
+        the first available one (bundled or in the user's skins dir). Returns
+        True on success; warns and returns False if none can be loaded."""
+        path = self.get_last_skin()
+        if not path or not os.path.exists(path):
+            skins = self.available_skins()
+            path = skins[0][1] if skins else None
+        if not path:
+            QMessageBox.information(
+                self, _('Winamp Skin'),
+                _('No skins are available. Add a .wsz skin or a skin folder to '
+                  '{}.').format(self.skins_dir()))
+            return False
+        try:
+            from .skinned.skin import Skin
+            from .skinned.window import SkinnedShell
+            shell = SkinnedShell(self, Skin(path))
+        except Exception as e:
+            logging.warning('Failed to load skin %s: %s', path, e)
+            QMessageBox.warning(
+                self, _('Winamp Skin'),
+                _('Failed to load the skin:\n{}').format(e))
+            return False
+        self.set_skinned_shell(shell)
+        self.set_last_skin(path)
+        return True
+
     def _build_main_menu(self):
         menu = QMenu(self)
         menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
         menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
         menu.addSeparator()
         self._skin_action = menu.addAction(_('Winamp Skin'), self.show_skinned_view)
-        self._skin_action.setVisible(False)   # shown once a skin is available
         menu.addSeparator()
         menu.addAction(_('Help'), lambda: self.open_url('https://github.com/k5blazerfl/Pyrrha'))
         menu.addAction(_('About'), self.show_about)
