@@ -99,6 +99,13 @@ def main():
         skinned = SkinnedShell(window, Skin(skin_path), scale=args.scale)
         window.set_skinned_shell(skinned)   # enables the view toggle in both menus
         skinned.show()
+        window.settings['skinned-view'] = True   # remember for next start
+    elif window.settings['skinned-view']:
+        # Restore the skinned view from the last session, honoring the saved
+        # classic/modern skin mode. Fall back to the standard window if the
+        # skinned shell can't be built (e.g. no skins available).
+        if not window.show_skinned_view(force_modern=False):
+            window.show()
     else:
         window.show()
 

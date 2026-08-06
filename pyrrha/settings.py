@@ -44,6 +44,9 @@ _ROOT_DEFAULTS = {
     'force-client': ('', str),
     'volume': (0.7, float),
     'audio-quality': ('highQuality', str),
+    # Which top-level view the player was last in: True = skinned (Winamp)
+    # view, False = standard (native) window. Restored at startup.
+    'skinned-view': (False, bool),
 }
 
 # Plugin child schema. Two flavours, matching the old .plugin / .plugin-enabled

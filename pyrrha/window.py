@@ -387,24 +387,30 @@ class PyrrhaWindow(QMainWindow):
     def show_standard_view(self):
         """Switch from the skinned UI to the standard (native) window."""
         self._skinned_active = False
+        self.settings['skinned-view'] = False   # remember for next start
         if self.skinned_shell is not None:
             self.skinned_shell.hide()
         self.show()
         self.raise_()
         self.activateWindow()
 
-    def show_skinned_view(self):
+    def show_skinned_view(self, force_modern=True):
         """Switch from the standard window to the skinned UI, building the
-        skinned shell on first use."""
-        if self.skinned_shell is None and not self._build_skinned_shell():
-            return
+        skinned shell on first use. ``force_modern`` opens the curated Modern
+        view (the menu default); pass False to honor the last-used skin mode,
+        as when restoring the saved view at startup. Returns True if the
+        skinned view is now shown, False if it could not be built."""
+        if self.skinned_shell is None and not self._build_skinned_shell(force_modern):
+            return False
         self._skinned_active = True
+        self.settings['skinned-view'] = True    # remember for next start
         self.hide()
         self.skinned_shell.show()
         self.skinned_shell.raise_()
         self.skinned_shell.activateWindow()
+        return True
 
-    def _build_skinned_shell(self):
+    def _build_skinned_shell(self, force_modern=True):
         """Create the Winamp-skinned shell on demand from the last-used skin, or
         the first available one (bundled or in the user's skins dir). Returns
         True on success; warns and returns False if none can be loaded."""
@@ -418,9 +424,10 @@ class PyrrhaWindow(QMainWindow):
                 _('No skins are available. Add a .wsz skin or a skin folder to '
                   '{}.').format(self.skins_dir()))
             return False
-        # Open the curated Modern (album-art) view by default; Classic stays a
-        # click away in the skinned window's mode menu.
-        self.set_skin_mode('modern')
+        if force_modern:
+            # Open the curated Modern (album-art) view by default; Classic stays
+            # a click away in the skinned window's mode menu.
+            self.set_skin_mode('modern')
         try:
             from .skinned.skin import Skin
             from .skinned.window import SkinnedShell
