@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_ID
-from ..appicon import app_icon
+from ..appicon import tray_icon
 from ..plugin import PyrrhaPlugin
 
 # (setting value, label). Pyrrha ships a single app icon in the theme.
@@ -43,7 +43,7 @@ def _resolve_icon(name):
     # handed it a themed QIcon, Qt would advertise only the icon *name* over
     # D-Bus, which some desktops re-resolve to a stale icon (e.g. a leftover
     # Pithos one from the theme).
-    return app_icon()
+    return tray_icon()
 
 
 class NotificationIconPlugin(PyrrhaPlugin):

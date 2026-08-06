@@ -16,7 +16,12 @@ import os
 from PySide6.QtGui import QIcon
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), 'icons', 'pyrrha.png')
+TRAY_ICON_PATH = os.path.join(os.path.dirname(__file__), 'icons', 'pyrrha-sti.png')
 
 
 def app_icon():
     return QIcon(ICON_PATH)
+
+
+def tray_icon():
+    return QIcon(TRAY_ICON_PATH)
