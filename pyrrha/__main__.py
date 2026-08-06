@@ -61,8 +61,11 @@ def main():
     app.setApplicationName('Pyrrha')
     app.setApplicationDisplayName('Pyrrha')
     app.setDesktopFileName(APP_ID)
-    from .appicon import app_icon
+    from .appicon import app_icon, sync_user_icon
     app.setWindowIcon(app_icon())
+    # Keep the compositor-visible themed icon in step with the bundled one
+    # (Wayland ignores setWindowIcon for the taskbar). No-op when unchanged.
+    sync_user_icon()
 
     # Flush the QSettings-backed config to disk on exit (writes are otherwise
     # only synced periodically by Qt).
