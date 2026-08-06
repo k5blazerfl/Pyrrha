@@ -37,8 +37,9 @@ from gi.repository import Gst, GstAudio, GstPbutils, GLib
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHBoxLayout, QListView, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QSlider, QStatusBar, QStyle, QToolButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QFileDialog, QHBoxLayout, QListView, QMainWindow, QMenu,
+    QMessageBox, QPushButton, QSlider, QStatusBar, QStyle, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from .pandora import make_pandora
@@ -51,6 +52,7 @@ from .pandora.data import (
 )
 
 from . import __version__
+from . import local
 from .settings import get_settings
 from .appicon import app_icon
 from .keyring import SecretService, is_flatpak
@@ -231,6 +233,10 @@ class PyrrhaWindow(QMainWindow):
         self.current_song_index = None
         self.current_station = None
         self.current_station_id = self.settings['last-station-id']
+        # Local-file playback mode: the playlist is a static list of LocalSong
+        # objects instead of an endless Pandora station.
+        self.local_mode = False
+        self._local_dir = ''   # last folder used in the open dialogs
 
         self.auto_retrying_auth = False
         self.have_stations = False
@@ -741,6 +747,7 @@ class PyrrhaWindow(QMainWindow):
     def station_changed(self, station, reconnecting=False):
         if station is self.current_station:
             return
+        self.local_mode = False   # picking a station leaves local playback
         self.waiting_for_playlist = False
         if not reconnecting:
             self.stop()
@@ -819,11 +826,16 @@ class PyrrhaWindow(QMainWindow):
             return self.songs_model.song_at(self.current_song_index)
 
     def start_song(self, song_index):
-        songs_remaining = len(self.songs_model) - song_index
-        if songs_remaining <= 0:
-            return self.get_playlist(start=True)
-        elif songs_remaining == 1:
-            self.get_playlist()
+        if self.local_mode:
+            # Static playlist: stop at the ends instead of fetching more.
+            if not (0 <= song_index < len(self.songs_model)):
+                return self.stop()
+        else:
+            songs_remaining = len(self.songs_model) - song_index
+            if songs_remaining <= 0:
+                return self.get_playlist(start=True)
+            elif songs_remaining == 1:
+                self.get_playlist()
 
         prev = self.current_song
         self.stop()
@@ -846,8 +858,9 @@ class PyrrhaWindow(QMainWindow):
         os.environ['PULSE_PROP_media.artist'] = song.artist
         os.environ['PULSE_PROP_media.name'] = '{}: {}'.format(song.artist, song.title)
         os.environ['PULSE_PROP_media.filename'] = audioUrl
-        self.player.set_property('buffer-size', int(song.bitrate) * 375)
-        self.player.set_property('connection-speed', int(song.bitrate))
+        if song.bitrate:   # network tuning; irrelevant (and None) for local files
+            self.player.set_property('buffer-size', int(song.bitrate) * 375)
+            self.player.set_property('connection-speed', int(song.bitrate))
         self.player.set_property("uri", audioUrl)
         self._set_player_state(PseudoGst.BUFFERING)
         self.playcount += 1
@@ -864,6 +877,62 @@ class PyrrhaWindow(QMainWindow):
     def next_song(self, *ignore):
         if self.current_song_index is not None:
             self.start_song(self.current_song_index + 1)
+
+    # ----------------------------------------------------- local playback
+    def open_local_files(self, *ignore):
+        exts = ' '.join('*' + e for e in local.AUDIO_EXTENSIONS)
+        paths, _sel = QFileDialog.getOpenFileNames(
+            self, _('Open Audio Files'), self._local_dir,
+            '{} ({})'.format(_('Audio files'), exts))
+        if not paths:
+            return
+        self._local_dir = os.path.dirname(paths[0])
+        self._load_local(paths, os.path.basename(self._local_dir) or _('Local Files'))
+
+    def open_local_folder(self, *ignore):
+        d = QFileDialog.getExistingDirectory(self, _('Open Folder'), self._local_dir)
+        if not d:
+            return
+        self._local_dir = d
+        self._load_local([d], os.path.basename(d.rstrip('/')) or _('Local Files'))
+
+    def _load_local(self, paths, label):
+        files = local.collect_audio_files(paths)
+        if not files:
+            QMessageBox.information(self, _('Open'),
+                                    _('No playable audio files were found.'))
+            return
+        self.status_push('net', _('Reading files…'))
+        songs = local.build_songs(files)
+        self.status_pop('net')
+        if not songs:
+            return
+
+        self.stop()
+        self.local_mode = True
+        self.current_station = None
+        self.current_song_index = None
+        self.songs_model.clear()
+        for s in songs:
+            s.index = len(self.songs_model)
+            self.songs_model.append_song(s)
+            self.update_song_row(s)
+            self._set_local_art(s)
+        self.stations_button.setText(label)
+        self.start_song(0)
+
+    def _set_local_art(self, song):
+        """Turn a LocalSong's embedded/sidecar art bytes into a row pixmap."""
+        if not song.art_bytes:
+            return
+        img = QImage.fromData(song.art_bytes)
+        if img.isNull():
+            return
+        pixmap = QPixmap.fromImage(img.scaled(
+            ALBUM_ART_SIZE, ALBUM_ART_SIZE,
+            Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+        song.art_pixbuf = pixmap
+        self.songs_model.update_row(song.index, pixmap=pixmap)
 
     # --------------------------------------------------------- state machine
     def _set_player_state(self, target, change_gst_state=False):
@@ -955,6 +1024,8 @@ class PyrrhaWindow(QMainWindow):
                     os.remove(os.path.join(self.tempdir, art.path))
 
     def get_playlist(self, start=False):
+        if self.local_mode:
+            return   # local playlists are static; never fetched from Pandora
         if self.playlist_update_timer_id:
             GLib.source_remove(self.playlist_update_timer_id)
         self.playlist_update_timer_id = 0
@@ -1392,7 +1463,9 @@ class PyrrhaWindow(QMainWindow):
         song = self.selected_song()
         if song is None or self.current_song_index is None:
             return False
-        playable = song.index > self.current_song_index
+        # Pandora only lets you jump forward in the endless playlist; local
+        # playlists are static, so any track is playable.
+        playable = self.local_mode or song.index > self.current_song_index
         if playable:
             self.start_song(song.index)
         return playable
@@ -1405,11 +1478,15 @@ class PyrrhaWindow(QMainWindow):
         return callback
 
     def love_song(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if song:
             self.worker_run(song.rate, (RATE_LOVE,), self._rate_callback(song), "Loving song...")
 
     def ban_song(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if not song:
             return
@@ -1418,12 +1495,16 @@ class PyrrhaWindow(QMainWindow):
             self.next_song()
 
     def unrate_song(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if song:
             self.worker_run(song.rate, (RATE_NONE,), self._rate_callback(song),
                             "Removing song rating...")
 
     def tired_song(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if not song:
             return
@@ -1432,16 +1513,22 @@ class PyrrhaWindow(QMainWindow):
             self.next_song()
 
     def bookmark_song(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if song:
             self.worker_run(song.bookmark, (), None, "Bookmarking...")
 
     def bookmark_song_artist(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if song:
             self.worker_run(song.bookmark_artist, (), None, "Bookmarking...")
 
     def info_song(self, *ignore, song=None):
+        if self.local_mode:
+            return
         song = song or self.current_song
         if song:
             self.open_url(song.songDetailURL)
@@ -1466,6 +1553,11 @@ class PyrrhaWindow(QMainWindow):
         if song is None:
             return
         menu = QMenu(self)
+        if self.local_mode:
+            # Ratings/bookmarks/stations are Pandora-only; offer just playback.
+            menu.addAction(_('Play'), lambda: self.start_song(song.index))
+            menu.exec(self.songs_view.viewport().mapToGlobal(pos))
+            return
         if song.rating != RATE_LOVE:
             menu.addAction(_('Love'), lambda: self.love_song(song=song))
         else:
