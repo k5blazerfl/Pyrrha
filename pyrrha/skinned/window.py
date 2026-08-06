@@ -675,6 +675,9 @@ class SkinnedWindow(QWidget):
             menu.addSeparator()
             menu.addAction(_('Open Files…'), c.open_local_files)
             menu.addAction(_('Open Folder…'), c.open_local_folder)
+            menu.addAction(_('Open Playlist…'), c.open_playlist)
+            save = menu.addAction(_('Save Playlist…'), c.save_playlist)
+            save.setEnabled(len(c.songs_model) > 0)
         else:
             menu.addAction(_('Switch to Local Playback'), c.switch_to_local)
             menu.addSeparator()

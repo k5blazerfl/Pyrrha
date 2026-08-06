@@ -200,3 +200,60 @@ def build_songs(paths):
         except Exception as e:
             logging.warning('Skipping %s: %s', path, e)
     return songs
+
+
+# -- playlist files (M3U / PLS) --------------------------------------------
+
+PLAYLIST_EXTENSIONS = ('.m3u', '.m3u8', '.pls')
+
+
+def write_m3u(path, songs):
+    """Write an extended-M3U playlist for the given LocalSong objects. Paths are
+    stored relative to the playlist when they live under its directory (more
+    portable), else absolute."""
+    base = os.path.dirname(os.path.abspath(path))
+    lines = ['#EXTM3U']
+    for s in songs:
+        sp = os.path.abspath(s.path)
+        rel = os.path.relpath(sp, base)
+        stored = sp if rel.startswith('..') else rel
+        lines.append('#EXTINF:{},{} - {}'.format(
+            s.get_duration_sec() or -1, s.artist, s.title))
+        lines.append(stored)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
+def _resolve(base, entry):
+    p = entry if os.path.isabs(entry) else os.path.join(base, entry)
+    p = os.path.abspath(p)
+    return p if os.path.isfile(p) else None
+
+
+def read_playlist(path):
+    """Return the ordered, existing file paths referenced by an M3U or PLS
+    playlist. Relative entries resolve against the playlist's directory."""
+    base = os.path.dirname(os.path.abspath(path))
+    is_pls = path.lower().endswith('.pls')
+    out = []
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if is_pls:
+                    if line.lower().startswith('file'):
+                        entry = line.partition('=')[2].strip()
+                    else:
+                        continue
+                elif line.startswith('#'):
+                    continue
+                else:
+                    entry = line
+                resolved = _resolve(base, entry)
+                if resolved:
+                    out.append(resolved)
+    except OSError as e:
+        logging.warning('Could not read playlist %s: %s', path, e)
+    return out

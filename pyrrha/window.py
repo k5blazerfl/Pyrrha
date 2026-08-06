@@ -980,6 +980,43 @@ class PyrrhaWindow(QMainWindow):
         self._local_dir = d
         self._load_local([d], os.path.basename(d.rstrip('/')) or _('Local Files'))
 
+    def open_playlist(self, *ignore):
+        exts = ' '.join('*' + e for e in local.PLAYLIST_EXTENSIONS)
+        path, _sel = QFileDialog.getOpenFileName(
+            self, _('Open Playlist'), self._local_dir,
+            '{} ({})'.format(_('Playlists'), exts))
+        if not path:
+            return
+        self._local_dir = os.path.dirname(path)
+        paths = local.read_playlist(path)
+        if not paths:
+            QMessageBox.information(self, _('Open Playlist'),
+                                    _('The playlist has no playable files.'))
+            return
+        self._load_local(paths, os.path.splitext(os.path.basename(path))[0])
+
+    def save_playlist(self, *ignore):
+        songs = [self.songs_model.song_at(i) for i in range(len(self.songs_model))]
+        if not songs:
+            QMessageBox.information(self, _('Save Playlist'),
+                                    _('The playlist is empty.'))
+            return
+        start = os.path.join(self._local_dir or os.path.expanduser('~'),
+                             '{}.m3u'.format(self.stations_button.text() or 'playlist'))
+        path, _sel = QFileDialog.getSaveFileName(
+            self, _('Save Playlist'), start,
+            '{} (*.m3u)'.format(_('M3U playlist')))
+        if not path:
+            return
+        if os.path.splitext(path)[1].lower() not in ('.m3u', '.m3u8'):
+            path += '.m3u'
+        try:
+            local.write_m3u(path, songs)
+            self._local_dir = os.path.dirname(path)
+        except OSError as e:
+            QMessageBox.warning(self, _('Save Playlist'),
+                                _('Could not save:\n{}').format(e))
+
     def _load_local(self, paths, label):
         files = local.collect_audio_files(paths)
         if not files:
