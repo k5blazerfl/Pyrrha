@@ -15,9 +15,12 @@ element's -24..+12 range. Slider-column and button offsets follow the classic
 EQMAIN spec and are easy to tune against a real skin.
 """
 
+import logging
+import os
+
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QFileDialog, QMenu, QWidget
 
 W, H = 275, 116
 BANDS = 10
@@ -66,6 +69,52 @@ PRESETS = [
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+# --- Winamp EQ preset files (.eqf / winamp.q1) -----------------------------
+# Layout: a 31-byte signature, then per preset a 257-byte null-padded name, 10
+# band bytes (low→high) and 1 preamp byte. Each value is 0..63, where 0 = +12 dB
+# (slider top), 31/32 ≈ 0 dB and 63 = -12 dB. Bands are ordered low→high, the
+# same as our _bands / the GStreamer equalizer, so indices map directly.
+EQF_SIGNATURE = b'Winamp EQ library file v1.1\x1a!--'
+EQF_NAME_LEN = 257
+
+
+def _eqf_val_to_db(v):
+    return (31.5 - v) * (24.0 / 63.0)
+
+
+def _eqf_db_to_val(db):
+    return max(0, min(63, int(round(31.5 - db * (63.0 / 24.0)))))
+
+
+def parse_eqf(data):
+    """Parse .eqf/.q1 bytes into a list of (name, bands[10] dB, preamp dB)."""
+    if not data.startswith(EQF_SIGNATURE):
+        raise ValueError('not a Winamp EQ library file')
+    out = []
+    off = len(EQF_SIGNATURE)
+    rec = EQF_NAME_LEN + BANDS + 1
+    while off + rec <= len(data):
+        raw_name = data[off:off + EQF_NAME_LEN].split(b'\x00', 1)[0]
+        name = raw_name.decode('latin-1', 'replace').strip() or 'Preset'
+        vals = data[off + EQF_NAME_LEN:off + rec]
+        bands = [_eqf_val_to_db(v) for v in vals[:BANDS]]
+        out.append((name, bands, _eqf_val_to_db(vals[BANDS])))
+        off += rec
+    return out
+
+
+def build_eqf(presets):
+    """Serialize [(name, bands[10] dB, preamp dB)] into .eqf bytes."""
+    buf = bytearray(EQF_SIGNATURE)
+    for name, bands, preamp in presets:
+        nm = name.encode('latin-1', 'replace')[:EQF_NAME_LEN - 1]
+        buf += nm + b'\x00' * (EQF_NAME_LEN - len(nm))
+        for i in range(BANDS):
+            buf.append(_eqf_db_to_val(bands[i] if i < len(bands) else 0.0))
+        buf.append(_eqf_db_to_val(preamp))
+    return bytes(buf)
 
 
 class SkinnedEqWindow(QWidget):
@@ -155,8 +204,12 @@ class SkinnedEqWindow(QWidget):
         return int((TITLE_H if self._collapsed else H) * self._scale())
 
     def _toggle_collapse(self):
-        self._collapsed = not self._collapsed
-        self.window().relayout()
+        shell = self.window()
+        if hasattr(shell, 'toggle_shade'):
+            shell.toggle_shade(self)
+        else:
+            self._collapsed = not self._collapsed
+            self.window().relayout()
 
     def _close_panel(self):
         self._closed = True
@@ -198,8 +251,51 @@ class SkinnedEqWindow(QWidget):
         for name, values in PRESETS:
             menu.addAction(name, lambda *a, v=values: self._apply_preset(v))
         menu.addSeparator()
+        menu.addAction(_('Load Preset File…'), lambda: self._load_preset_file(global_pos))
+        menu.addAction(_('Save Preset File…'), self._save_preset_file)
         menu.addAction(_('Reset Preamp'), self._reset_preamp)
         menu.exec(global_pos)
+
+    def _load_preset_file(self, anchor_pos):
+        """Import a Winamp .eqf/.q1 preset file. Applies the sole preset, or pops
+        a chooser when the file is a library of several."""
+        path, _sel = QFileDialog.getOpenFileName(
+            self, _('Load Winamp EQ Preset'), '',
+            _('Winamp EQ presets (*.eqf *.q1 *.q2);;All files (*)'))
+        if not path:
+            return
+        try:
+            with open(path, 'rb') as f:
+                presets = parse_eqf(f.read())
+        except (OSError, ValueError) as e:
+            logging.warning('Failed to load EQ preset %s: %s', path, e)
+            return
+        if not presets:
+            return
+        if len(presets) == 1:
+            _n, bands, preamp = presets[0]
+            self._apply_preset(bands, preamp)
+            return
+        chooser = QMenu(self)
+        for name, bands, preamp in presets:
+            chooser.addAction(name, lambda *a, b=bands, p=preamp: self._apply_preset(b, p))
+        chooser.exec(anchor_pos)
+
+    def _save_preset_file(self):
+        """Export the current bands + preamp as a single-preset Winamp .eqf."""
+        path, _sel = QFileDialog.getSaveFileName(
+            self, _('Save Winamp EQ Preset'), 'preset.eqf',
+            _('Winamp EQ presets (*.eqf);;All files (*)'))
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += '.eqf'
+        name = os.path.splitext(os.path.basename(path))[0] or 'Pyrrha'
+        try:
+            with open(path, 'wb') as f:
+                f.write(build_eqf([(name, self._bands, self._preamp)]))
+        except OSError as e:
+            logging.warning('Failed to save EQ preset %s: %s', path, e)
 
     def _reset_preamp(self):
         self._preamp = 0.0
@@ -236,9 +332,10 @@ class SkinnedEqWindow(QWidget):
         self._apply()
         self.update()
 
-    def _apply_preset(self, values):
-        self._bands = [_clamp(float(v), DB_MIN, DB_MAX) for v in values]
-        self._preamp = 0.0
+    def _apply_preset(self, values, preamp=0.0):
+        bands = [_clamp(float(v), DB_MIN, DB_MAX) for v in values]
+        self._bands = (bands + [0.0] * BANDS)[:BANDS]
+        self._preamp = _clamp(float(preamp), DB_MIN, DB_MAX)
         if not self._on:                 # a preset implies the EQ is wanted
             self._on = True
         self._apply()

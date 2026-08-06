@@ -126,8 +126,12 @@ class SkinnedPlaylistWindow(QWidget):
         return QRect(self._lw() - 21, 3, 9, 9)
 
     def _toggle_collapse(self):
-        self._collapsed = not self._collapsed
-        self.window().relayout()
+        shell = self.window()
+        if hasattr(shell, 'toggle_shade'):
+            shell.toggle_shade(self)
+        else:
+            self._collapsed = not self._collapsed
+            self.window().relayout()
 
     def _close_panel(self):
         self._closed = True
@@ -351,8 +355,13 @@ class SkinnedPlaylistWindow(QWidget):
             s = self._scale()
             tl = self.mapToGlobal(QPoint(0, 0))
             gy = event.globalPosition().toPoint().y()
-            self._height = int(max(HMIN, min(HMAX, (gy - tl.y()) / s)))
-            self.window().relayout()
+            new_h = int(max(HMIN, min(HMAX, (gy - tl.y()) / s)))
+            shell = self.window()
+            if hasattr(shell, 'resize_panel_height'):
+                shell.resize_panel_height(self, new_h)
+            else:
+                self._height = new_h
+                self.window().relayout()
 
     def mouseReleaseEvent(self, event):
         if getattr(self, '_titledrag', False):

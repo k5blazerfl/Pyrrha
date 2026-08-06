@@ -1003,11 +1003,12 @@ class SkinnedWindow(QWidget):
         return int(h * self._scale())
 
     def _toggle_shade(self):
-        self._collapsed = not self._collapsed
         shell = self.window()
-        if hasattr(shell, 'relayout'):
-            shell.relayout()
-        self.update()
+        if hasattr(shell, 'toggle_shade'):
+            shell.toggle_shade(self)
+        else:
+            self._collapsed = not self._collapsed
+            self.update()
 
     def closeEvent(self, event):
         # Only fires when used stand-alone; inside the shell the shell quits.
@@ -1315,11 +1316,14 @@ class SkinnedShell(QWidget):
 
     def _apply_snap_set(self, dragged_pos):
         """Nudge the dragged panel's candidate position so any panel in the
-        moving set snaps its edges to a panel *outside* the set (magnetic
-        docking). Chooses the closest snap per axis within SNAP_DIST and returns
-        the adjusted position of the dragged panel."""
+        moving set snaps its edges to a panel *outside* the set or to a screen
+        edge (magnetic docking). Chooses the closest snap per axis within
+        SNAP_DIST and returns the adjusted position of the dragged panel."""
         thr = SNAP_DIST * self.scale
         externals = [o for o in self._classic_panels() if o not in self._fset]
+        # Overlay-local screen edges: the overlay is the available geometry
+        # placed at its origin, so left/top are 0 and right/bottom are its size.
+        ow, oh = self._overlay_size()
         best_dx = best_dy = 0
         near_dx = near_dy = thr + 1
         for m in self._fset:
@@ -1341,6 +1345,16 @@ class SkinnedShell(QWidget):
                         d = e - a
                         if abs(d) <= thr and abs(d) < near_dy:
                             near_dy, best_dy = abs(d), d
+            # Screen edges span the whole axis, so no overlap test: snap the
+            # panel's left/right to the screen's left/right, top/bottom likewise.
+            for a, e in ((mv.left(), 0), (mv.right() + 1, ow)):
+                d = e - a
+                if abs(d) <= thr and abs(d) < near_dx:
+                    near_dx, best_dx = abs(d), d
+            for a, e in ((mv.top(), 0), (mv.bottom() + 1, oh)):
+                d = e - a
+                if abs(d) <= thr and abs(d) < near_dy:
+                    near_dy, best_dy = abs(d), d
         return QPoint(dragged_pos.x() + best_dx, dragged_pos.y() + best_dy)
 
     def start_free_drag(self, panel, global_pos):
@@ -1451,6 +1465,62 @@ class SkinnedShell(QWidget):
             result.add(cur)
             stack.extend(children.get(cur, ()))
         return result
+
+    def toggle_shade(self, panel):
+        """Windowshade a panel (collapse to / expand from its title bar). In
+        classic mode a height change would leave a gap or overlap under the
+        panel, so shift the panels docked below it by the delta to keep them
+        docked. Modern's relayout re-stacks vertically on its own."""
+        if self.mode == 'classic':
+            old_h = panel.display_height()
+            panel._collapsed = not panel._collapsed
+            self._shift_docked_below(panel, panel.display_height() - old_h)
+        else:
+            panel._collapsed = not panel._collapsed
+        self.relayout()
+        panel.update()
+
+    def resize_panel_height(self, panel, new_h):
+        """Set a resizable panel's logical height (the playlist's corner grip),
+        shifting panels docked below it so they track the moving bottom edge in
+        classic mode."""
+        if getattr(panel, '_height', None) == new_h:
+            return
+        if self.mode == 'classic':
+            old_dh = panel.display_height()
+            panel._height = new_h
+            self._shift_docked_below(panel, panel.display_height() - old_dh)
+        else:
+            panel._height = new_h
+        self.relayout()
+
+    def _shift_docked_below(self, panel, dy):
+        """Move panels docked below ``panel`` (and anything docked to them) by
+        ``dy`` device px, so they stay flush when the panel's height changes.
+        Reads the pre-relayout geometry, so call before relayout()."""
+        if not dy:
+            return
+        rp = panel.geometry()   # still the old rect (not yet relaid out)
+        tol = 2
+        seeds = []
+        for o in self._classic_panels():
+            if o is panel:
+                continue
+            r = o.geometry()
+            h_overlap = min(r.right(), rp.right()) - max(r.left(), rp.left())
+            if h_overlap > 0 and abs(r.top() - (rp.bottom() + 1)) <= tol:
+                seeds.append(o)
+        move, stack = set(), list(seeds)
+        while stack:
+            cur = stack.pop()
+            if cur in move:
+                continue
+            move.add(cur)
+            for o in self._classic_panels():
+                if o is not panel and o not in move and self._are_adjacent(cur, o):
+                    stack.append(o)
+        for p in move:
+            self._pos[self._panel_role(p)][1] += dy
 
     def end_free_drag(self):
         self._fdrag = self._fraw = self._flast = None
