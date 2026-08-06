@@ -90,7 +90,13 @@ def main():
         # is the visible face over it.
         from .skinned.skin import Skin
         from .skinned.window import SkinnedShell
-        skinned = SkinnedShell(window, Skin(args.skin), scale=args.scale)
+        skin_path = args.skin
+        if not os.path.exists(skin_path):
+            # Resolve a bare name (e.g. --skin Glare) to a bundled skin.
+            bundled = os.path.join(os.path.dirname(__file__), 'skins', args.skin)
+            if os.path.isdir(bundled):
+                skin_path = bundled
+        skinned = SkinnedShell(window, Skin(skin_path), scale=args.scale)
         window.set_skinned_shell(skinned)   # enables the view toggle in both menus
         skinned.show()
     else:

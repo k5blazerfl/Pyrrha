@@ -1165,24 +1165,34 @@ class PyrrhaWindow(QMainWindow):
     def skins_dir(self):
         return os.path.join(GLib.get_user_data_dir(), 'pyrrha', 'skins')
 
+    def bundled_skins_dir(self):
+        return os.path.join(os.path.dirname(__file__), 'skins')
+
     def available_skins(self):
-        """[(name, path)] of skins in the user skins directory (~/.local/share/
-        pyrrha/skins): .wsz files and folders that contain a main.bmp."""
-        out = []
-        try:
-            entries = sorted(os.listdir(self.skins_dir()))
-        except OSError:
-            return out
-        for name in entries:
-            full = os.path.join(self.skins_dir(), name)
-            if os.path.isdir(full):
-                try:
-                    if any(f.lower() == 'main.bmp' for f in os.listdir(full)):
-                        out.append((name, full))
-                except OSError:
-                    pass
-            elif name.lower().endswith(('.wsz', '.zip')):
-                out.append((os.path.splitext(name)[0], full))
+        """[(name, path)] of skins: those bundled with Pyrrha plus the user's
+        (~/.local/share/pyrrha/skins) — .wsz files and folders with a main.bmp."""
+        out, seen = [], set()
+        for base in (self.bundled_skins_dir(), self.skins_dir()):
+            try:
+                entries = sorted(os.listdir(base))
+            except OSError:
+                continue
+            for name in entries:
+                full = os.path.join(base, name)
+                label = name
+                if os.path.isdir(full):
+                    try:
+                        if not any(f.lower() == 'main.bmp' for f in os.listdir(full)):
+                            continue
+                    except OSError:
+                        continue
+                elif name.lower().endswith(('.wsz', '.zip')):
+                    label = os.path.splitext(name)[0]
+                else:
+                    continue
+                if label.lower() not in seen:
+                    out.append((label, full))
+                    seen.add(label.lower())
         return out
 
     def _skin_mode_file(self):

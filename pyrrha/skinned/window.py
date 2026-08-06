@@ -13,6 +13,8 @@ against a real skin.
 """
 
 import logging
+import os
+import time
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter
@@ -492,6 +494,11 @@ class SkinnedWindow(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+        # A click that activates an unfocused window only focuses it — don't
+        # also fire a control (e.g. the clutterbar D would cycle the size).
+        shell = self.window()
+        if hasattr(shell, 'is_focus_click') and shell.is_focus_click():
+            return
         pos = (event.position() / self._scale()).toPoint()   # logical coords
         dx = self._dx()
         if MENU.contains(pos):
@@ -693,13 +700,18 @@ class SkinnedShell(QWidget):
     def __init__(self, controller, skin, scale=1.0):
         super().__init__(None, Qt.FramelessWindowHint)
         self.ctl = controller
-        self.skin = skin        # current skin (swappable at runtime)
         self.scale = scale      # UI scale factor (1, 1.5, 2, …)
         self.content_w = W      # shared logical content width (all panels stretch to it)
         # 'modern': album-art widen + unified resize; 'classic': faithful Winamp
         # (main/EQ pinned native, playlist independently resizable).
         self.mode = controller.get_skin_mode() if hasattr(controller, 'get_skin_mode') else 'modern'
         self.keep_above = False   # clutterbar "A" (KWin keep-above)
+        self._activated_at = 0.0  # when the window last became active (click-to-focus)
+        # Classic mode uses the user's chosen skin; Modern always uses the
+        # bundled Glare (the curated album-art experience).
+        self._classic_skin = skin
+        self._modern_skin = self._load_modern_skin() or skin
+        self.skin = self._modern_skin if self.mode == 'modern' else self._classic_skin
         self.setWindowTitle('Pyrrha')
         # Fills any area not covered by a panel (e.g. to the right of the
         # fixed-width main/EQ when the playlist is dragged wider).
@@ -708,10 +720,28 @@ class SkinnedShell(QWidget):
         pal.setColor(self.backgroundRole(), Qt.black)
         self.setPalette(pal)
 
-        self.main = SkinnedWindow(controller, skin, parent=self)
-        self.eq = SkinnedEqWindow(controller, skin, parent=self) if skin.has('eqmain.bmp') else None
-        self.pl = SkinnedPlaylistWindow(controller, skin, parent=self) if skin.has('pledit.bmp') else None
+        self.main = SkinnedWindow(controller, self.skin, parent=self)
+        self.eq = SkinnedEqWindow(controller, self.skin, parent=self) if self.skin.has('eqmain.bmp') else None
+        self.pl = SkinnedPlaylistWindow(controller, self.skin, parent=self) if self.skin.has('pledit.bmp') else None
         self.relayout()
+
+    def _load_modern_skin(self):
+        """The bundled Glare skin used by Modern mode (or None if unavailable)."""
+        try:
+            from .skin import Skin
+            if hasattr(self.ctl, 'bundled_skins_dir'):
+                path = os.path.join(self.ctl.bundled_skins_dir(), 'Glare')
+                if os.path.isdir(path):
+                    return Skin(path)
+        except Exception as e:
+            logging.warning('Failed to load the bundled Modern (Glare) skin: %s', e)
+        return None
+
+    def _apply_skin(self, skin):
+        self.skin = skin
+        for panel in (self.main, self.eq, self.pl):
+            if panel is not None:
+                panel.set_skin(skin)
 
     def _max_content_w(self):
         # Classic mode never widens main/EQ (they stay native, 275px).
@@ -732,6 +762,8 @@ class SkinnedShell(QWidget):
         self.content_w = W
         if mode == 'modern':
             self.scale = 1.0     # Size is Classic-only; Modern runs at 1x
+        # Modern always uses the bundled Glare; Classic uses the chosen skin.
+        self._apply_skin(self._modern_skin if mode == 'modern' else self._classic_skin)
         if hasattr(self.ctl, 'set_skin_mode'):
             self.ctl.set_skin_mode(mode)
         self.relayout()
@@ -761,7 +793,7 @@ class SkinnedShell(QWidget):
         self.relayout()
 
     def load_skin(self, path):
-        """Switch to another skin at runtime and repaint everything."""
+        """Load a skin for Classic mode (Modern always uses the bundled Glare)."""
         from .skin import Skin
         try:
             skin = Skin(path)
@@ -771,11 +803,10 @@ class SkinnedShell(QWidget):
         if not skin.has('main.bmp'):
             logging.warning('Not a valid Winamp skin (no main.bmp): %s', path)
             return False
-        self.skin = skin
-        for panel in (self.main, self.eq, self.pl):
-            if panel is not None:
-                panel.set_skin(skin)
-        self.relayout()
+        self._classic_skin = skin
+        if self.mode == 'classic':
+            self._apply_skin(skin)
+            self.relayout()
         self.ctl.set_last_skin(path)
         return True
 
@@ -831,6 +862,16 @@ class SkinnedShell(QWidget):
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange and not self.isMinimized():
             self._repaint_panels()
+        elif event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            self._activated_at = time.monotonic()   # for click-to-focus
+
+    def is_focus_click(self):
+        """True if a click arriving now is the one that just activated the window
+        (so controls shouldn't fire — the click only raises/focuses)."""
+        if time.monotonic() - self._activated_at < 0.25:
+            self._activated_at = 0.0
+            return True
+        return False
 
     def closeEvent(self, event):
         self.ctl.quit()

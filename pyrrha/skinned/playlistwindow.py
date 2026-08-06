@@ -31,6 +31,11 @@ LIST_TOP = TITLE_H + 2
 GRIP = 14                        # resize-corner hit/indicator size (bottom-right)
 HMIN, HMAX = TITLE_H + 3 * ROW_H, 1400   # the playlist resizes vertically only
 
+# Classic PLEDIT frame (borders + bottom button bar + scrollbar), drawn in
+# Classic mode for skins that ship it. Sprite coords are the Winamp standard.
+FRAME_L, FRAME_R, FRAME_B = 12, 19, 38   # left / right / bottom insets
+SB_THUMB = (52, 53, 8, 18)               # scrollbar thumb sprite
+
 DEFAULTS = {
     'normal': '#00FF00', 'current': '#FFFFFF',
     'normalbg': '#000000', 'selectedbg': '#0000C6',
@@ -131,8 +136,17 @@ class SkinnedPlaylistWindow(QWidget):
         model = self.ctl.songs_model
         return [model.song_at(i) for i in range(len(model))]
 
+    def _has_frame(self):
+        return self.skin.image('pledit.bmp').height() >= 110
+
+    def _frame_on(self):
+        return (not self._collapsed
+                and getattr(self.window(), 'mode', 'modern') == 'classic'
+                and self._has_frame())
+
     def _visible_range(self, count):
-        capacity = max(1, (self._lh() - 6 - LIST_TOP) // ROW_H)
+        bottom = FRAME_B if self._frame_on() else 6
+        capacity = max(1, (self._lh() - bottom - LIST_TOP) // ROW_H)
         cur = self.ctl.current_song_index or 0
         start = 0
         if count > capacity and cur >= capacity - 1:
@@ -148,8 +162,12 @@ class SkinnedPlaylistWindow(QWidget):
         if s != 1:
             p.scale(s, s)
 
-        # Body background.
-        p.fillRect(QRect(0, TITLE_H, w, self._lh() - TITLE_H), self.c_bg)
+        lh = self._lh()
+        frame = self._frame_on()
+        li, ri, bi = (FRAME_L, FRAME_R, FRAME_B) if frame else (0, 0, 0)
+
+        # Body background (inset by the frame borders).
+        p.fillRect(QRect(li, TITLE_H, w - li - ri, lh - TITLE_H - bi), self.c_bg)
 
         # Title bar from PLEDIT.BMP pieces (left corner, tiled fill, right
         # corner, centered title piece), stretched to the current width.
@@ -166,7 +184,11 @@ class SkinnedPlaylistWindow(QWidget):
             p.end()
             return
 
-        # Song list.
+        # Classic frame: side/bottom borders, bottom button bar and scrollbar.
+        if frame:
+            self._paint_frame(p, w, lh)
+
+        # Song list (inset within the frame).
         p.setFont(self._font)
         songs = self._rows()
         cur = self.ctl.current_song_index
@@ -176,7 +198,7 @@ class SkinnedPlaylistWindow(QWidget):
             song = songs[i]
             if song is None:
                 continue
-            row = QRect(0, y, w, ROW_H)
+            row = QRect(li, y, w - li - ri, ROW_H)
             if i == cur:
                 p.fillRect(row, self.c_sel)
             mark = RATING_MARK.get(self.ctl.song_icon(song), '')
@@ -185,12 +207,41 @@ class SkinnedPlaylistWindow(QWidget):
             p.drawText(row.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
             y += ROW_H
 
-        # Resize grip (bottom-right corner).
-        p.setPen(self.c_normal)
-        bx, by = w - 3, self._lh() - 3
-        for d in (3, 6, 9):
-            p.drawLine(bx - d, by, bx, by - d)
+        # Resize grip (only without a frame; the frame has its own handle).
+        if not frame:
+            p.setPen(self.c_normal)
+            bx, by = w - 3, lh - 3
+            for d in (3, 6, 9):
+                p.drawLine(bx - d, by, bx, by - d)
         p.end()
+
+    def _paint_frame(self, p, w, lh):
+        sk = self.skin
+        lb = sk.sprite('pledit.bmp', 0, 42, FRAME_L, 29)
+        rb = sk.sprite('pledit.bmp', 32, 42, FRAME_R, 29)
+        y = TITLE_H
+        while y < lh - FRAME_B:
+            p.drawImage(0, y, lb)
+            p.drawImage(w - FRAME_R, y, rb)
+            y += 29
+        # Bottom bar: left corner (Add/Rem/Sel/Misc) + tiled fill + right corner.
+        by = lh - FRAME_B
+        fill = sk.sprite('pledit.bmp', 150, 72, 25, FRAME_B)
+        x = 125
+        while x < w - 150:
+            p.drawImage(x, by, fill)
+            x += 25
+        p.drawImage(0, by, sk.sprite('pledit.bmp', 0, 72, 125, FRAME_B))
+        p.drawImage(w - 150, by, sk.sprite('pledit.bmp', 126, 72, 150, FRAME_B))
+        # Scrollbar thumb on the right border.
+        count = len(self._rows())
+        start, end = self._visible_range(count)
+        cap = max(1, end - start)
+        track_top = TITLE_H + 1
+        track_h = max(0, lh - FRAME_B - track_top - SB_THUMB[3])
+        frac = start / (count - cap) if count > cap else 0.0
+        ty = track_top + int(frac * track_h)
+        p.drawImage(w - FRAME_R + 2, ty, sk.sprite('pledit.bmp', *SB_THUMB))
 
     # -------------------------------------------------------------- mouse
     def _song_index_at(self, y):
