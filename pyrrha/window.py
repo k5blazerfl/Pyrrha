@@ -401,7 +401,9 @@ class PyrrhaWindow(QMainWindow):
         return view.isVisible() and not view.isMinimized()
 
     def show_standard_view(self):
-        """Switch from the skinned UI to the standard (native) window."""
+        """Switch from the skinned UI to the standard (native) window. This is
+        the dedicated Pandora UI, so leaving local playback for Pandora
+        streaming is implied — switch back if we were in local mode."""
         self._skinned_active = False
         self.settings['skinned-view'] = False   # remember for next start
         if self.skinned_shell is not None:
@@ -409,6 +411,8 @@ class PyrrhaWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        if self.local_mode:
+            self.switch_to_pandora()
 
     def show_skinned_view(self, force_modern=True):
         """Switch from the standard window to the skinned UI, building the
@@ -467,12 +471,13 @@ class PyrrhaWindow(QMainWindow):
         return True
 
     def _build_main_menu(self):
+        # The standard window is the dedicated Pandora UI, so it stays
+        # Pandora-oriented; entering it forces Pandora streaming (see
+        # show_standard_view). Local playback lives in the skinned views.
         menu = QMenu(self)
         menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
         menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
         menu.addSeparator()
-        # Match the skinned window's UI submenu: offer the skinned modes you can
-        # switch to (Pithos is the current view here, so it's not listed).
         ui_menu = menu.addMenu(_('UI'))
         ui_menu.addAction(_('WinAMP 2.x'), lambda: self.show_skinned_view_mode('classic'))
         ui_menu.addAction(_('Pyrrha'), lambda: self.show_skinned_view_mode('modern'))
