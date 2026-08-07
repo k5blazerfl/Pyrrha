@@ -375,11 +375,18 @@ class PreferencesDialog(QDialog):
         return self.explicit_filter_check.isChecked()
 
     # -- apply -------------------------------------------------------------
+    def _set_if_changed(self, key, value):
+        # Every write emits ``changed`` (which the window acts on — a proxy write
+        # forces a Pandora reconnect), so only write when the value actually
+        # differs. Otherwise applying one setting spuriously reconnects.
+        if self._settings[key] != value:
+            self._settings[key] = value
+
     def _write_plain_settings(self):
-        self._settings['proxy'] = self.proxy_entry.text()
-        self._settings['control-proxy'] = self.control_proxy_entry.text()
-        self._settings['control-proxy-pac'] = self.control_proxy_pac_entry.text()
-        self._settings['audio-quality'] = self.quality_combo.currentData()
+        self._set_if_changed('proxy', self.proxy_entry.text())
+        self._set_if_changed('control-proxy', self.control_proxy_entry.text())
+        self._set_if_changed('control-proxy-pac', self.control_proxy_pac_entry.text())
+        self._set_if_changed('audio-quality', self.quality_combo.currentData())
 
     def _apply(self, close_after):
         email = self.email_entry.text()
