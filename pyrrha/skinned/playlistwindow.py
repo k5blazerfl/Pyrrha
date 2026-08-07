@@ -73,6 +73,7 @@ class SkinnedPlaylistWindow(QWidget):
         self._scroll = 0          # top visible row when browsing manually
         self._follow = True       # auto-scroll to keep the current song visible
         self._sb_drag = None      # scrollbar thumb drag: cursor-to-thumb-top offset
+        self._selected = None     # click-selected row (highlight, distinct from playing)
 
         # A new song re-enables follow so the view snaps to what's now playing;
         # between songs the user can scroll the list freely.
@@ -84,7 +85,7 @@ class SkinnedPlaylistWindow(QWidget):
         model = controller.songs_model
         model.rowsInserted.connect(lambda *_: self.update())
         model.rowsRemoved.connect(lambda *_: self.update())
-        model.modelReset.connect(lambda *_: self.update())
+        model.modelReset.connect(self._on_model_reset)
 
     def set_skin(self, skin):
         self.skin = skin
@@ -174,6 +175,10 @@ class SkinnedPlaylistWindow(QWidget):
 
     def _on_song_changed(self, *ignore):
         self._follow = True
+        self.update()
+
+    def _on_model_reset(self, *ignore):
+        self._selected = None    # a new list (e.g. station switch) clears selection
         self.update()
 
     def _capacity(self):
@@ -269,11 +274,11 @@ class SkinnedPlaylistWindow(QWidget):
             if song is None:
                 continue
             row = QRect(li, y, w - li - ri, ROW_H)
-            if i == cur:
+            if i == self._selected:              # click-selection highlight
                 p.fillRect(row, self.c_sel)
             mark = RATING_MARK.get(self.ctl.song_icon(song), '')
             text = '{}. {} - {}{}'.format(i + 1, song.artist, song.title, mark)
-            p.setPen(self.c_current if i == cur else self.c_normal)
+            p.setPen(self.c_current if i == cur else self.c_normal)   # playing = Current color
             p.drawText(row.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
             y += ROW_H
 
@@ -335,9 +340,11 @@ class SkinnedPlaylistWindow(QWidget):
             self.window().toggle_width()
             return
         idx = self._song_index_at(pos.y())
-        cur = self.ctl.current_song_index
-        if idx is not None and cur is not None and idx > cur:
-            self.ctl.start_song(idx)
+        if idx is not None:
+            cur = self.ctl.current_song_index
+            # Local playback can start any track; Pandora can only go forward.
+            if self.ctl.local_mode or (cur is not None and idx > cur):
+                self.ctl.start_song(idx)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -376,6 +383,12 @@ class SkinnedPlaylistWindow(QWidget):
                 handle = shell.windowHandle()
                 if handle is not None:
                     handle.startSystemMove()
+            return
+        # Click in the list selects the row under the cursor.
+        idx = self._song_index_at(pos.y())
+        if idx is not None:
+            self._selected = idx
+            self.update()
 
     def contextMenuEvent(self, event):
         if self._collapsed:
@@ -388,6 +401,8 @@ class SkinnedPlaylistWindow(QWidget):
         songs = self._rows()
         if idx is None or not (0 <= idx < len(songs)) or songs[idx] is None:
             return
+        self._selected = idx     # highlight the row the menu acts on
+        self.update()
         song = songs[idx]
         c = self.ctl
         icon = c.song_icon(song)
