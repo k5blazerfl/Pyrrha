@@ -24,6 +24,8 @@ from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QMenu, QWidget
 
+from .font import CHAR_H, CHAR_W, TextFont
+
 W, H = 275, 200                  # default logical size
 TITLE_H = 20
 ROW_H = 12
@@ -35,6 +37,16 @@ HMIN, HMAX = TITLE_H + 3 * ROW_H, 1400   # the playlist resizes vertically only
 # Classic mode for skins that ship it. Sprite coords are the Winamp standard.
 FRAME_L, FRAME_R, FRAME_B = 12, 19, 38   # left / right / bottom insets
 SB_THUMB = (52, 53, 8, 18)               # scrollbar thumb sprite
+
+# Miniplayer in the bottom-right corner (all coords relative to that corner's
+# origin at x = width-150, y = height-FRAME_B). Verified against the base/Bento/
+# Winamp3/Winamp5 skins: a title strip on top, a transport row + time below.
+MP_TITLE = (5, 8, 92)                    # current-song title strip (x, y, max width)
+MP_COLON_X = 83                          # corner x of the skin's baked time ':' (gap)
+MP_CLOCK_Y = 23                          # clock digit baseline y (in the corner)
+MP_BTN_Y, MP_BTN_H = 24, 13              # transport button row (y band)
+MP_BTNS = (('prev', 4, 10), ('play', 14, 10), ('pause', 24, 10),
+           ('stop', 34, 10), ('next', 44, 11), ('eject', 55, 13))
 
 
 def _fmt_time(secs):
@@ -66,6 +78,7 @@ class SkinnedPlaylistWindow(QWidget):
         self.setWindowTitle('Pyrrha Playlist')
 
         self._apply_pledit_theme(skin)
+        self._text_font = TextFont(skin)   # bitmap font for the miniplayer, as the main window
         self._collapsed = False
         self._closed = False
         self._resizing = False
@@ -76,6 +89,11 @@ class SkinnedPlaylistWindow(QWidget):
         self._selection = set()   # selected rows (multi-select), distinct from playing
         self._focus = None        # row the keyboard acts on / scrolls to
         self._anchor = None       # anchor row for shift-range selection
+        self._press_row = None    # row pressed (candidate for drag-to-reorder)
+        self._press_pos = None    # press position (to detect drag threshold)
+        self._deferred_select = None  # single-select this row on release if no drag
+        self._reorder = False     # a drag-to-reorder is in progress
+        self._drop_index = None   # insertion index shown while reordering
 
         # A new song re-enables follow so the view snaps to what's now playing;
         # between songs the user can scroll the list freely.
@@ -92,6 +110,7 @@ class SkinnedPlaylistWindow(QWidget):
     def set_skin(self, skin):
         self.skin = skin
         self._apply_pledit_theme(skin)
+        self._text_font = TextFont(skin)
         self.update()
 
     def _apply_pledit_theme(self, skin):
@@ -459,13 +478,18 @@ class SkinnedPlaylistWindow(QWidget):
                 p.drawText(row.adjusted(0, 0, -4, 0), Qt.AlignVCenter | Qt.AlignRight, time_str)
             y += ROW_H
 
-        # Track count + total duration in the bottom bar (Winamp shows time here).
-        if frame:
-            total = sum(int(s.get_duration_sec() or 0) for s in songs if s is not None)
-            label = '{} / {}'.format(len(songs), _fmt_time(total))
+        # Drag-to-reorder: insertion line at the drop position.
+        if self._reorder and self._drop_index is not None:
+            iy = LIST_TOP + (self._drop_index - start) * ROW_H
+            list_bottom = lh - (bi if frame else 6)
+            iy = max(LIST_TOP, min(list_bottom, iy))
             p.setPen(self.c_current)
-            p.drawText(QRect(li, lh - FRAME_B, w - li - 30, FRAME_B),
-                       Qt.AlignRight | Qt.AlignVCenter, label)
+            p.drawLine(li + 3, iy, w - ri - 3, iy)
+            p.drawLine(li + 3, iy - 1, w - ri - 3, iy - 1)
+
+        # Miniplayer (current title + total time) in the bottom-right corner.
+        if frame:
+            self._paint_miniplayer(p, w, lh, songs, cur)
 
         # Resize grip (only without a frame; the frame has its own handle).
         if not frame:
@@ -499,6 +523,54 @@ class SkinnedPlaylistWindow(QWidget):
         if sb is not None:
             thumb = sb[0]
             p.drawImage(thumb.x(), thumb.y(), sk.sprite('pledit.bmp', *SB_THUMB))
+
+    def _paint_miniplayer(self, p, w, lh, songs, cur):
+        """The bottom-right mini display, drawn in the skin's bitmap TEXT font
+        (matching the main window): the current song's title in the strip, and
+        the playlist's total time as digits straddling the skin's baked ':'
+        (so we draw no ':' of our own). The transport glyphs are baked into the
+        corner sprite; _mini_transport_at makes them clickable."""
+        cx, cy = w - 150, lh - FRAME_B
+        # Title (clipped to the strip; the TEXT font uppercases, as Winamp does).
+        if cur is not None and 0 <= cur < len(songs) and songs[cur] is not None:
+            song = songs[cur]
+            tx, ty, tw = MP_TITLE
+            p.save()
+            p.setClipRect(cx + tx, cy + ty, tw, CHAR_H)
+            p.drawImage(cx + tx, cy + ty,
+                        self._text_font.render('{}. {} - {}'.format(cur + 1, song.artist, song.title)))
+            p.restore()
+        # Total time: minutes right of the transport, seconds after the baked ':'.
+        total = sum(int(s.get_duration_sec() or 0) for s in songs if s is not None)
+        if total > 0:
+            gap, y = cx + MP_COLON_X, cy + MP_CLOCK_Y
+            x = gap - 2
+            for ch in reversed(str(total // 60)):     # MM… right-aligned to the ':'
+                x -= CHAR_W
+                p.drawImage(x, y, self._text_font.render(ch))
+            x = gap + 3
+            for ch in '%02d' % (total % 60):          # SS left-aligned after the ':'
+                p.drawImage(x, y, self._text_font.render(ch))
+                x += CHAR_W
+
+    def _mini_transport_at(self, pos):
+        """Which mini-transport button (prev/play/pause/stop/next/eject) is at
+        ``pos``, or None."""
+        if not self._frame_on():
+            return None
+        cx, cy = self._lw() - 150, self._lh() - FRAME_B
+        if not (cy + MP_BTN_Y <= pos.y() <= cy + MP_BTN_Y + MP_BTN_H):
+            return None
+        for name, bx, bw in MP_BTNS:
+            if cx + bx <= pos.x() < cx + bx + bw:
+                return name
+        return None
+
+    def _do_transport(self, name):
+        c = self.ctl
+        {'prev': c.prev_song, 'play': c.user_play, 'pause': c.pause,
+         'stop': c.stop, 'next': c.next_song,
+         'eject': c.open_local_files}.get(name, lambda: None)()
 
     # -------------------------------------------------------------- mouse
     def _song_index_at(self, y):
@@ -554,6 +626,11 @@ class SkinnedPlaylistWindow(QWidget):
         if btn is not None:
             self._show_bottom_menu(btn, event.globalPosition().toPoint())
             return
+        # Miniplayer transport buttons (bottom-right corner).
+        mt = self._mini_transport_at(pos)
+        if mt is not None:
+            self._do_transport(mt)
+            return
         if pos.y() < TITLE_H:
             shell = self.window()
             # Classic: tear the playlist off the stack (magnetically re-snaps).
@@ -570,8 +647,20 @@ class SkinnedPlaylistWindow(QWidget):
         idx = self._song_index_at(pos.y())
         if idx is not None:
             mods = event.modifiers()
-            self._select(idx, extend=bool(mods & Qt.ShiftModifier),
-                         toggle=bool(mods & Qt.ControlModifier))
+            shift = bool(mods & Qt.ShiftModifier)
+            ctrl = bool(mods & Qt.ControlModifier)
+            if getattr(self.ctl, 'local_mode', False) and not shift and not ctrl:
+                # Local mode: prepare a possible drag-to-reorder. Keep an existing
+                # multi-selection (so it can be dragged); otherwise select this row.
+                self._press_row = idx
+                self._press_pos = QPoint(pos)
+                if idx in self._selection:
+                    self._deferred_select = idx   # collapse to just this row on click-release
+                else:
+                    self._select(idx)
+                    self._deferred_select = None
+            else:
+                self._select(idx, extend=shift, toggle=ctrl)
 
     def contextMenuEvent(self, event):
         if self._collapsed:
@@ -628,6 +717,17 @@ class SkinnedPlaylistWindow(QWidget):
                 frac = ((py - self._sb_drag - track_top) / track_h) if track_h else 0.0
                 self._scroll_to(round(frac * self._max_start()))
             return
+        if self._press_row is not None and (event.buttons() & Qt.LeftButton):
+            pos = (event.position() / self._scale()).toPoint()
+            if not self._reorder and (pos - self._press_pos).manhattanLength() > 4:
+                self._reorder = True     # crossed the threshold -> start reordering
+                if self._press_row not in self._selection:
+                    self._select(self._press_row)
+                self._deferred_select = None
+            if self._reorder:
+                self._drop_index = self._drop_index_at(pos.y())
+                self.update()
+            return
         if self._resizing:
             # Drag the corner: vertical only. Classic mode stays native width;
             # modern width is driven by the double-click album-art widen.
@@ -647,8 +747,40 @@ class SkinnedPlaylistWindow(QWidget):
             self._titledrag = False
             self.window().end_free_drag()
             return
+        if self._reorder:
+            rows = sorted(self._selection)
+            if rows and self._drop_index is not None and hasattr(self.ctl, 'move_songs'):
+                new_start = self.ctl.move_songs(rows, self._drop_index)
+                if new_start is not None:
+                    self._selection = set(range(new_start, new_start + len(rows)))
+                    self._focus = self._anchor = new_start
+            self._reset_drag()
+            self.update()
+            return
+        if self._press_row is not None:
+            # A plain click without a drag: collapse a kept multi-selection.
+            if self._deferred_select is not None:
+                self._select(self._deferred_select)
+            self._reset_drag()
         self._sb_drag = None
         self._resizing = False
+
+    def _drop_index_at(self, y):
+        """Insertion index (0..count) for a drop at cursor y."""
+        count = len(self._rows())
+        start, _end = self._visible_range(count)
+        rel = y - LIST_TOP
+        if rel < 0:
+            return start
+        row = start + rel // ROW_H
+        if rel % ROW_H > ROW_H // 2:      # lower half -> insert after
+            row += 1
+        return max(0, min(count, row))
+
+    def _reset_drag(self):
+        self._press_row = self._press_pos = self._deferred_select = None
+        self._reorder = False
+        self._drop_index = None
 
     def wheelEvent(self, event):
         # Over a scrollable list the wheel scrolls it; otherwise fall through to

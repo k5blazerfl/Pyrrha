@@ -1000,6 +1000,31 @@ class PyrrhaWindow(QMainWindow):
                     self.current_song_index = r
                     break
 
+    def move_songs(self, rows, target):
+        """Move ``rows`` so they land at insertion index ``target`` (before the
+        original row at that index). Local playback only; keeps the current song
+        current. Returns the moved block's new start row, or None on no-op."""
+        if not self.local_mode:
+            return None
+        n = len(self.songs_model)
+        moving = sorted(r for r in set(rows) if 0 <= r < n)
+        if not moving:
+            return None
+        cur_song = self.current_song
+        remaining = [i for i in range(n) if i not in set(moving)]
+        before = sum(1 for i in remaining if i < target)     # non-moving rows above the drop
+        new_order = remaining[:before] + moving + remaining[before:]
+        if new_order == list(range(n)):
+            return None
+        self.songs_model.reorder(new_order)
+        self._reindex_songs()
+        if cur_song is not None:
+            for r in range(len(self.songs_model)):
+                if self.songs_model.song_at(r) is cur_song:
+                    self.current_song_index = r
+                    break
+        return before
+
     def _reindex_songs(self):
         for r in range(len(self.songs_model)):     # keep song.index == its row
             self.songs_model.song_at(r).index = r
