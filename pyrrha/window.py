@@ -300,9 +300,15 @@ class PyrrhaWindow(QMainWindow):
     def playing(self):
         return self._buffer_recovery_state is not PseudoGst.PAUSED
 
+    PREQUEUE_TARGET = 8   # unskipped Pandora songs to keep queued ahead of current
+
     # -------------------------------------------------------------------- ui
     def init_ui(self):
         self.songs_model = SongsModel(self)
+        # Keep the Pandora queue topped up: refill on song change and after each
+        # fetch completes (chains until the buffer is full).
+        self.song_changed.connect(lambda *_: self._ensure_queue_buffer())
+        self.songs_added.connect(self._on_songs_added)
         self.songs_view = QListView()
         self.songs_view.setModel(self.songs_model)
         self.songs_view.setItemDelegate(AlbumArtDelegate(self.songs_view))
@@ -1029,13 +1035,35 @@ class PyrrhaWindow(QMainWindow):
         for r in range(len(self.songs_model)):     # keep song.index == its row
             self.songs_model.song_at(r).index = r
 
+    def _is_skipped(self, idx):
+        song = self.songs_model.song_at(idx) if idx is not None else None
+        return getattr(song, 'skip', False)
+
     def next_song(self, *ignore):
         if self.current_song_index is None:
             return
+        n = len(self.songs_model)
         if self.local_mode:
             idx = self._next_local_index(+1)
+            for _ in range(n):                 # advance past skip-marked songs
+                if idx is None or not self._is_skipped(idx):
+                    break
+                idx = self._next_local_index(+1, from_idx=idx)
             return self.stop() if idx is None else self.start_song(idx)
-        self.start_song(self.current_song_index + 1)
+        # Pandora queue: jump to the next song not marked to skip. The queue
+        # buffer is kept full via _ensure_queue_buffer (song_changed/songs_added).
+        idx = self.current_song_index + 1
+        while idx < n and self._is_skipped(idx):
+            idx += 1
+        self.start_song(idx)
+
+    def set_songs_skip(self, rows, skip):
+        """Mark/unmark songs so playback jumps over them when advancing (a
+        preemptive skip for queued songs)."""
+        for r in rows:
+            song = self.songs_model.song_at(r)
+            if song is not None:
+                song.skip = bool(skip)
 
     def prev_song(self, *ignore):
         # Only local playback can go backwards; Pandora streams can't be rewound.
@@ -1057,13 +1085,15 @@ class PyrrhaWindow(QMainWindow):
         self._shuffle_order = order
         return order
 
-    def _next_local_index(self, step):
+    def _next_local_index(self, step, from_idx=None):
         """The next playlist index for local playback given shuffle/repeat, or
-        None when the playlist ends and repeat is off."""
+        None when the playlist ends and repeat is off. ``from_idx`` overrides the
+        reference position (used to advance past skip-marked songs)."""
         n = len(self.songs_model)
         if n == 0:
             return None
-        cur = self.current_song_index if self.current_song_index is not None else 0
+        cur = from_idx if from_idx is not None else \
+            (self.current_song_index if self.current_song_index is not None else 0)
         if self.shuffle:
             order = self._shuffle_order
             if not order or len(order) != n:
@@ -1325,6 +1355,34 @@ class PyrrhaWindow(QMainWindow):
                 age = timestamp - art.stat().st_mtime
                 if age > ART_CACHE_TIME:
                     os.remove(os.path.join(self.tempdir, art.path))
+
+    def fetch_more_songs(self):
+        """Proactively pull another batch of Pandora songs into the queue without
+        interrupting playback — get_playlist() runs on a worker and only appends
+        (start=False). No-op in local mode or while a fetch is already running."""
+        if not self.local_mode and self.current_station is not None \
+                and not self.waiting_for_playlist:
+            self.get_playlist()
+
+    def _unskipped_ahead(self):
+        cur = self.current_song_index
+        if cur is None:
+            return len(self.songs_model)
+        return sum(1 for j in range(cur + 1, len(self.songs_model))
+                   if not self._is_skipped(j))
+
+    def _ensure_queue_buffer(self):
+        """Keep PREQUEUE_TARGET unskipped songs queued ahead of the current one
+        (Pandora), fetching another batch in the background if we're short."""
+        if self.local_mode or self.current_station is None:
+            return
+        if self._unskipped_ahead() < self.PREQUEUE_TARGET:
+            self.fetch_more_songs()
+
+    def _on_songs_added(self, count):
+        # Chain fetches until the buffer is full; stop if a fetch returned nothing.
+        if count > 0:
+            self._ensure_queue_buffer()
 
     def get_playlist(self, start=False):
         if self.local_mode:
