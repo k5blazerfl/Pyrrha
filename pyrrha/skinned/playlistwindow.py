@@ -367,6 +367,20 @@ class SkinnedPlaylistWindow(QWidget):
         self._selection = set(range(len(self._rows()))) - self._selection
         self.update()
 
+    def _skip_selection(self, value):
+        """Mark/unmark the selected songs to be skipped when advancing."""
+        rows = sorted(self._selection)
+        if rows and hasattr(self.ctl, 'set_songs_skip'):
+            self.ctl.set_songs_skip(rows, value)
+            self.update()
+
+    def _dim(self, c):
+        """Blend a text colour halfway to the background — a faded 'skipped' look
+        that works on both light and dark skins."""
+        b = self.c_bg
+        return QColor((c.red() + b.red()) // 2, (c.green() + b.green()) // 2,
+                      (c.blue() + b.blue()) // 2)
+
     def _clear_playlist(self):
         if getattr(self.ctl, 'local_mode', False):
             self.ctl.clear_playlist()
@@ -402,6 +416,9 @@ class SkinnedPlaylistWindow(QWidget):
                 m.addAction(_('Add Files…'), c.open_local_files)
                 m.addAction(_('Add Folder…'), c.open_local_folder)
             else:
+                a = m.addAction(_('Get More Songs'), c.fetch_more_songs)
+                a.setEnabled(getattr(c, 'current_station', None) is not None)
+                m.addSeparator()
                 m.addAction(_('Switch to Local Playback'), c.switch_to_local)
         elif btn == 'rem':
             a = m.addAction(_('Remove Selected'), self._remove_selection)
@@ -484,7 +501,11 @@ class SkinnedPlaylistWindow(QWidget):
                 p.fillRect(row, self.c_sel)
             mark = RATING_MARK.get(self.ctl.song_icon(song), '')
             text = '{}. {} - {}{}'.format(i + 1, song.artist, song.title, mark)
-            p.setPen(self.c_current if i == cur else self.c_normal)   # playing = Current color
+            skip = getattr(song, 'skip', False)   # marked to be skipped when advancing
+            color = self.c_current if i == cur else self.c_normal   # playing = Current
+            if skip:
+                color = self._dim(color)
+            p.setPen(color)
             dur = int(song.get_duration_sec() or 0) if hasattr(song, 'get_duration_sec') else 0
             time_str = _fmt_time(dur) if dur > 0 else ''
             time_w = 42 if time_str else 0
@@ -492,6 +513,9 @@ class SkinnedPlaylistWindow(QWidget):
             p.drawText(row.adjusted(4, 0, -6 - time_w, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
             if time_str:
                 p.drawText(row.adjusted(0, 0, -4, 0), Qt.AlignVCenter | Qt.AlignRight, time_str)
+            if skip:                              # strikethrough = will be skipped
+                my = y + ROW_H // 2
+                p.drawLine(li + 4, my, w - li - ri - 6 - time_w, my)
             y += ROW_H
 
         # Drag-to-reorder: insertion line at the drop position.
@@ -778,6 +802,12 @@ class SkinnedPlaylistWindow(QWidget):
             menu.addSeparator()
             menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
             menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+        # Preemptive skip: playback jumps over marked songs when advancing.
+        menu.addSeparator()
+        if getattr(song, 'skip', False):
+            menu.addAction(_('Don’t Skip'), lambda: self._skip_selection(False))
+        else:
+            menu.addAction(_('Skip'), lambda: self._skip_selection(True))
         if c.current_song_index is not None:
             menu.addSeparator()
             menu.addAction(_('Scroll to Now Playing'), self._scroll_to_current)
