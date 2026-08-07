@@ -103,11 +103,15 @@ class VisWindow(QWidget):
         self.setWindowTitle(_('Pyrrha Visualizer'))
         self.setMinimumSize(160, 90)
         self.resize(480, 240)
-        self._mode = VIS_BARS
-        self._preset = PRESET_SKIN
-        self._peak_hold = False
-        self._gain = 1.0
-        self._falloff = _FALLOFF[1][1]
+        # Restore the remembered defaults (see settings.py); clamp on the way in.
+        s = controller.settings
+        self._settings = s
+        self._mode = min(5, max(0, s['vis-mode']))
+        self._preset = min(3, max(0, s['vis-preset']))
+        self._peak_hold = bool(s['vis-peak-hold'])
+        self._gain = float(s['vis-gain'])
+        self._falloff = float(s['vis-falloff'])
+        s.changed.connect(self._on_setting_changed)
 
         self._bars = []          # current bar heights (0..1), sized to width
         self._peaks = []
@@ -337,19 +341,47 @@ class VisWindow(QWidget):
                            self._grad[min(last, int((1 - z) * (last + 1)))])
 
     # ------------------------------------------------------------ interaction
+    def _on_setting_changed(self, key):
+        """Reflect a defaults change made in Preferences while we're open."""
+        if not key.startswith('vis-'):
+            return
+        s = self._settings
+        if key == 'vis-mode':
+            self._mode = min(5, max(0, s['vis-mode']))
+        elif key == 'vis-preset':
+            self._preset = min(3, max(0, s['vis-preset']))
+            self._recompute_palette()
+        elif key == 'vis-gain':
+            self._gain = float(s['vis-gain'])
+        elif key == 'vis-falloff':
+            self._falloff = float(s['vis-falloff'])
+        elif key == 'vis-peak-hold':
+            self._peak_hold = bool(s['vis-peak-hold'])
+        self.update()
+
     def set_mode(self, mode):
         self._mode = mode
+        self._settings['vis-mode'] = mode
         self.update()
 
     def set_preset(self, preset):
         self._preset = preset
+        self._settings['vis-preset'] = preset
         self._recompute_palette()
+
+    def set_gain(self, gain):
+        self._gain = max(0.4, min(3.0, round(gain, 2)))
+        self._settings['vis-gain'] = self._gain
+
+    def set_falloff(self, falloff):
+        self._falloff = falloff
+        self._settings['vis-falloff'] = falloff
 
     def toggle_fullscreen(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
     def adjust_gain(self, delta):
-        self._gain = max(0.4, min(3.0, round(self._gain + delta, 2)))
+        self.set_gain(self._gain + delta)
 
     def mouseDoubleClickEvent(self, event):
         self.toggle_fullscreen()
@@ -372,12 +404,12 @@ class VisWindow(QWidget):
             a.setChecked(self._preset == preset)
         sens = menu.addMenu(_('Sensitivity'))
         for label, g in _SENSITIVITY:
-            a = sens.addAction(_(label), lambda *_a, gg=g: setattr(self, '_gain', gg))
+            a = sens.addAction(_(label), lambda *_a, gg=g: self.set_gain(gg))
             a.setCheckable(True)
             a.setChecked(abs(self._gain - g) < 0.01)
         fall = menu.addMenu(_('Falloff'))
         for label, f in _FALLOFF:
-            a = fall.addAction(_(label), lambda *_a, ff=f: setattr(self, '_falloff', ff))
+            a = fall.addAction(_(label), lambda *_a, ff=f: self.set_falloff(ff))
             a.setCheckable(True)
             a.setChecked(abs(self._falloff - f) < 0.001)
         menu.addSeparator()
@@ -389,6 +421,7 @@ class VisWindow(QWidget):
 
     def _toggle_peak_hold(self):
         self._peak_hold = not self._peak_hold
+        self._settings['vis-peak-hold'] = self._peak_hold
 
     # ------------------------------------------------------------ lifecycle
     def showEvent(self, event):

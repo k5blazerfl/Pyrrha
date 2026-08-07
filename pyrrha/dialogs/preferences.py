@@ -150,6 +150,7 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(_('Preferences'))
         self.setModal(True)
+        self._window = parent          # PyrrhaWindow, for skin-mode get/set
         self._settings = get_settings()
         self._last_email = ''
         self._last_password = None
@@ -162,8 +163,11 @@ class PreferencesDialog(QDialog):
         self.nav.setSpacing(1)
         self.stack = QStackedWidget()
         self._add_page(_('Account'), 'preferences-desktop-user', self._build_account_page())
+        self._add_page(_('Interface'), 'preferences-desktop-theme', self._build_interface_page())
         self._add_page(_('Audio'), 'audio-card', self._build_audio_page())
         self._add_page(_('Network'), 'preferences-system-network', self._build_network_page())
+        self._add_page(_('Visualizer'), 'multimedia-volume-control', self._build_visualizer_page())
+        self._add_page(_('Shortcuts'), 'preferences-desktop-keyboard', self._build_shortcuts_page())
         self._add_page(_('Plugins'), 'preferences-plugin', self._build_plugins_page())
         self._add_page(_('About'), 'help-about', self._build_about_page())
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
@@ -263,6 +267,89 @@ class PreferencesDialog(QDialog):
         form.addRow('', hint)
         return self._page(form)
 
+    # -- interface page ----------------------------------------------------
+    def _build_interface_page(self):
+        self.startup_view_combo = QComboBox()
+        self.startup_view_combo.addItem(_('Standard (Pithos)'), False)
+        self.startup_view_combo.addItem(_('Skinned (Winamp)'), True)
+        self.skin_mode_combo = QComboBox()
+        self.skin_mode_combo.addItem(_('WinAMP 2.x (Classic)'), 'classic')
+        self.skin_mode_combo.addItem(_('Pyrrha (Modern)'), 'modern')
+        self.sort_stations_check = QCheckBox(_('Sort stations alphabetically'))
+
+        form = QFormLayout()
+        form.addRow(_('Start in:'), self.startup_view_combo)
+        form.addRow(_('Skinned mode:'), self.skin_mode_combo)
+        form.addRow('', self.sort_stations_check)
+        return self._page(form)
+
+    # -- visualizer page ---------------------------------------------------
+    def _build_visualizer_page(self):
+        from ..skinned import viswindow as vis
+        self.vis_mode_combo = QComboBox()
+        for m in range(6):
+            self.vis_mode_combo.addItem(_(vis._MODE_NAMES[m]), m)
+        self.vis_preset_combo = QComboBox()
+        for p in range(4):
+            self.vis_preset_combo.addItem(_(vis._PRESET_NAMES[p]), p)
+        self.vis_sens_combo = QComboBox()
+        for label, g in vis._SENSITIVITY:
+            self.vis_sens_combo.addItem(_(label), g)
+        self.vis_falloff_combo = QComboBox()
+        for label, f in vis._FALLOFF:
+            self.vis_falloff_combo.addItem(_(label), f)
+        self.vis_peak_check = QCheckBox(_('Peak hold'))
+
+        form = QFormLayout()
+        form.addRow(_('Default mode:'), self.vis_mode_combo)
+        form.addRow(_('Color preset:'), self.vis_preset_combo)
+        form.addRow(_('Sensitivity:'), self.vis_sens_combo)
+        form.addRow(_('Falloff:'), self.vis_falloff_combo)
+        form.addRow('', self.vis_peak_check)
+        hint = QLabel(_('These also apply live to an open visualizer window.'))
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: palette(mid);')
+        form.addRow('', hint)
+        return self._page(form)
+
+    # -- shortcuts page (read-only reference) ------------------------------
+    def _build_shortcuts_page(self):
+        rows = [
+            (_('Play / Pause / Stop'), 'X / C / V'),
+            (_('Previous / Next'), 'Z / B'),
+            (_('Open files'), 'L'),
+            (_('Jump to File'), 'J'),
+            (_('Jump to Time'), 'Ctrl+J'),
+            (_('File Info / Edit Tags'), 'Alt+3'),
+            (_('Volume up / down'), '↑ / ↓'),
+            (_('Seek back / forward'), '← / →'),
+            (_('Shuffle / Repeat'), 'S / R'),
+            (_('Double size'), 'Ctrl+D'),
+            (_('Always on top'), 'Ctrl+A'),
+            (_('Preferences'), 'Ctrl+P'),
+            (_('Skin browser'), 'Alt+S'),
+            (_('Playlist nav / play / remove'), '↑↓ PgUp/Dn · Enter · Del'),
+            (_('Visualizer modes'), '1–6'),
+            (_('Visualizer fullscreen / peak-hold'), 'F / P'),
+        ]
+        form = QFormLayout()
+        for action, keys in rows:
+            key_label = QLabel(keys)
+            key_label.setStyleSheet('font-family: monospace;')
+            form.addRow(action + ':', key_label)
+        note = QLabel(_('Keyboard shortcuts work in the skinned (Winamp) view.'))
+        note.setWordWrap(True)
+        note.setStyleSheet('color: palette(mid);')
+        form.addRow('', note)
+
+        inner = QWidget()
+        inner.setLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(inner)
+        scroll.setFrameShape(QFrame.NoFrame)
+        return scroll
+
     # -- plugins page ------------------------------------------------------
     def _build_plugins_page(self):
         container = QWidget()
@@ -338,10 +425,20 @@ class PreferencesDialog(QDialog):
         self.control_proxy_entry.setText(self._settings['control-proxy'])
         self.control_proxy_pac_entry.setText(self._settings['control-proxy-pac'])
 
-        quality = self._settings['audio-quality']
-        idx = self.quality_combo.findData(quality)
-        if idx >= 0:
-            self.quality_combo.setCurrentIndex(idx)
+        self._select_data(self.quality_combo, self._settings['audio-quality'])
+
+        # Interface
+        self._select_data(self.startup_view_combo, self._settings['skinned-view'])
+        if self._window is not None and hasattr(self._window, 'get_skin_mode'):
+            self._select_data(self.skin_mode_combo, self._window.get_skin_mode())
+        self.sort_stations_check.setChecked(self._settings['sort-stations'])
+
+        # Visualizer
+        self._select_data(self.vis_mode_combo, self._settings['vis-mode'])
+        self._select_data(self.vis_preset_combo, self._settings['vis-preset'])
+        self._select_closest(self.vis_sens_combo, self._settings['vis-gain'])
+        self._select_closest(self.vis_falloff_combo, self._settings['vis-falloff'])
+        self.vis_peak_check.setChecked(self._settings['vis-peak-hold'])
 
         def got_password(password):
             self._last_password = password
@@ -350,6 +447,23 @@ class PreferencesDialog(QDialog):
 
         SecretService.get_account_password(self._last_email, got_password)
         self._update_apply_sensitivity()
+
+    @staticmethod
+    def _select_data(combo, value):
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    @staticmethod
+    def _select_closest(combo, value):
+        """Select the combo item whose data is numerically nearest ``value``
+        (sensitivity/falloff can hold a non-preset float set via hotkeys)."""
+        best, best_d = 0, None
+        for i in range(combo.count()):
+            d = abs(float(combo.itemData(i)) - float(value))
+            if best_d is None or d < best_d:
+                best, best_d = i, d
+        combo.setCurrentIndex(best)
 
     def _update_apply_sensitivity(self, *ignore):
         ok = bool(self.email_entry.text()) and bool(self.password_entry.text())
@@ -387,6 +501,20 @@ class PreferencesDialog(QDialog):
         self._set_if_changed('control-proxy', self.control_proxy_entry.text())
         self._set_if_changed('control-proxy-pac', self.control_proxy_pac_entry.text())
         self._set_if_changed('audio-quality', self.quality_combo.currentData())
+        # Interface
+        self._set_if_changed('skinned-view', self.startup_view_combo.currentData())
+        self._set_if_changed('sort-stations', self.sort_stations_check.isChecked())
+        # Visualizer (a live window picks these up via settings.changed)
+        self._set_if_changed('vis-mode', self.vis_mode_combo.currentData())
+        self._set_if_changed('vis-preset', self.vis_preset_combo.currentData())
+        self._set_if_changed('vis-gain', self.vis_sens_combo.currentData())
+        self._set_if_changed('vis-falloff', self.vis_falloff_combo.currentData())
+        self._set_if_changed('vis-peak-hold', self.vis_peak_check.isChecked())
+        # Skin mode lives in a file (get/set_skin_mode), not settings.
+        if self._window is not None and hasattr(self._window, 'set_skin_mode'):
+            mode = self.skin_mode_combo.currentData()
+            if self._window.get_skin_mode() != mode:
+                self._window.set_skin_mode(mode)
 
     def _apply(self, close_after):
         email = self.email_entry.text()

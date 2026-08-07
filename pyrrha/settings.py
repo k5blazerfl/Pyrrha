@@ -51,6 +51,12 @@ _ROOT_DEFAULTS = {
     # Local-playback play order (only affects local files).
     'shuffle': (False, bool),
     'repeat': (False, bool),
+    # Visualizer window defaults (remembered across sessions).
+    'vis-mode': (0, int),          # VIS_BARS
+    'vis-preset': (0, int),        # PRESET_SKIN
+    'vis-gain': (1.0, float),      # input sensitivity
+    'vis-falloff': (0.05, float),  # bar decay per frame
+    'vis-peak-hold': (False, bool),
 }
 
 # Plugin child schema. Two flavours, matching the old .plugin / .plugin-enabled
