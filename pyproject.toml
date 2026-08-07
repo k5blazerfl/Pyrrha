@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyrrha"
-version = "0.4.25"
+version = "0.4.27"
 description = "A Qt (PySide6) Pandora Radio client — a port of Pithos"
 readme = "pyrrha/README.md"
 requires-python = ">=3.10"
@@ -24,6 +24,11 @@ classifiers = [
 dependencies = [
     "PySide6-Essentials>=6.5",
     "PyGObject",
+    # Tolerant fallback decoder for skin bitmaps Qt's loader rejects (odd BMP
+    # variants, or PNG/GIF saved under a .bmp name). Optional at runtime — the
+    # skin loader degrades gracefully if it's missing — but listed so the wider
+    # skin-compatibility path is reliably available.
+    "Pillow",
 ]
 
 [project.optional-dependencies]

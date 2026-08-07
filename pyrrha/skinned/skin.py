@@ -11,8 +11,8 @@ import logging
 import os
 import zipfile
 
-from PySide6.QtCore import QPoint
-from PySide6.QtGui import QImage, QPolygon, QRegion
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QImage, QPainter, QPolygon, QRegion
 
 
 def _ints(s):
@@ -78,20 +78,66 @@ class Skin:
     def image(self, name):
         name = name.lower()
         if name not in self._images:
-            img = QImage()
             data = self._raw.get(name)
-            if data:
-                if not img.loadFromData(data, 'BMP'):
-                    logging.warning('Failed to decode skin bitmap %s', name)
+            img = self._decode(data)
+            if img.isNull() and data:
+                logging.warning('Failed to decode skin bitmap %s', name)
             self._images[name] = img
         return self._images[name]
 
+    @staticmethod
+    def _decode(data):
+        """Decode skin-bitmap bytes tolerantly. Real skins aren't always clean
+        BMPs: some save a PNG/GIF under a .bmp name, others ship BMP variants
+        Qt's loader rejects. Try Qt's format sniffing first (which also catches
+        the renamed formats), then an explicit BMP hint, then a Pillow fallback
+        (if installed) that copes with the odd headers Qt won't."""
+        if not data:
+            return QImage()
+        img = QImage()
+        if img.loadFromData(data) or img.loadFromData(data, 'BMP'):
+            return img
+        return Skin._pillow_decode(data)
+
+    @staticmethod
+    def _pillow_decode(data):
+        try:
+            import io
+            from PIL import Image
+        except Exception:
+            return QImage()
+        try:
+            pim = Image.open(io.BytesIO(data)).convert('RGBA')
+        except Exception:
+            return QImage()
+        w, h = pim.size
+        # Detach from the transient buffer with copy(); RGBA8888 matches PIL's
+        # 'raw' RGBA byte order.
+        return QImage(pim.tobytes('raw', 'RGBA'), w, h, QImage.Format_RGBA8888).copy()
+
     def sprite(self, name, x, y, w, h):
-        """A w×h QImage cut from bitmap ``name`` at (x, y); empty if missing."""
+        """A w×h QImage cut from bitmap ``name`` at (x, y); empty if missing.
+
+        Regions that extend past the bitmap are padded *transparently* rather
+        than with QImage.copy's zero fill (which is opaque black on RGB bitmaps).
+        Some skins ship shorter sheets than the classic layout — e.g. a
+        volume.bmp with the handle baked into each frame and no separate handle
+        row — so reading the standard handle rect would otherwise paint a black
+        block. Transparent padding makes the out-of-bounds draw a no-op."""
         img = self.image(name)
         if img.isNull():
             return QImage()
-        return img.copy(x, y, w, h)
+        if x >= 0 and y >= 0 and x + w <= img.width() and y + h <= img.height():
+            return img.copy(x, y, w, h)      # fully in bounds — cheap path
+        out = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        out.fill(Qt.transparent)
+        sx, sy = max(0, x), max(0, y)
+        ex, ey = min(img.width(), x + w), min(img.height(), y + h)
+        if ex > sx and ey > sy:
+            p = QPainter(out)
+            p.drawImage(sx - x, sy - y, img.copy(sx, sy, ex - sx, ey - sy))
+            p.end()
+        return out
 
     # ------------------------------------------------------------ region.txt
     def _parse_regions(self):
