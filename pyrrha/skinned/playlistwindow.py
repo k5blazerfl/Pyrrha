@@ -82,6 +82,7 @@ class SkinnedPlaylistWindow(QWidget):
         self._collapsed = False
         self._closed = False
         self._resizing = False
+        self._cursor_name = False   # region cursor currently set (False = unknown)
         self._height = H          # logical height (resizable); width is never dragged
         self._scroll = 0          # top visible row when browsing manually
         self._follow = True       # auto-scroll to keep the current song visible
@@ -123,10 +124,27 @@ class SkinnedPlaylistWindow(QWidget):
 
     def set_skin(self, skin):
         self.skin = skin
+        self._cursor_name = False
+        self.unsetCursor()
         self._apply_pledit_theme(skin)
         self._text_font = TextFont(skin)
         self._mp_colon = None
         self.update()
+
+    def _cursor_for(self, pos):
+        if not self._collapsed and self._grip_rect().contains(pos):
+            return 'psize.cur'          # bottom-right resize corner
+        return None
+
+    def _update_cursor(self, pos):
+        if not self.skin.has_cursors:
+            return
+        name = self._cursor_for(pos)
+        if name == self._cursor_name:
+            return
+        self._cursor_name = name
+        cur = self.skin.cursor(name) if name else None
+        self.setCursor(cur) if cur is not None else self.unsetCursor()
 
     def _apply_pledit_theme(self, skin):
         """Load the playlist colors and font from the skin's PLEDIT.TXT (with
@@ -851,6 +869,8 @@ class SkinnedPlaylistWindow(QWidget):
             else:
                 self._height = new_h
                 self.window().relayout()
+            return
+        self._update_cursor((event.position() / self._scale()).toPoint())
 
     def mouseReleaseEvent(self, event):
         if self._mp_pressed:                       # release the mini-transport button

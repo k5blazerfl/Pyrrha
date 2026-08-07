@@ -138,6 +138,7 @@ class SkinnedEqWindow(QWidget):
         self._drag = None   # index of slider being dragged (-1 = preamp)
         self._collapsed = False
         self._closed = False
+        self._cursor_name = False    # region cursor currently set (False = unknown)
         self._well_cache = {}       # frame index -> magenta-keyed QImage
         self._eqex_present = None    # does this skin ship the windowshade titlebar?
         self._wells_present = None   # does this skin have slider wells?
@@ -157,12 +158,31 @@ class SkinnedEqWindow(QWidget):
 
     def set_skin(self, skin):
         self.skin = skin
+        self._cursor_name = False
+        self.unsetCursor()
         self._well_cache = {}
         self._eqex_present = None
         self._wells_present = None
         self._well_offset = None
         self._curve_colors_cache = None
         self.update()
+
+    def _cursor_for(self, pos):
+        if self._collapsed or pos.y() < TITLE_H:
+            return 'eqtitle.cur'
+        if self._slider_at(pos) is not None:
+            return 'eqslid.cur'
+        return None
+
+    def _update_cursor(self, pos):
+        if not self.skin.has_cursors:
+            return
+        name = self._cursor_for(pos)
+        if name == self._cursor_name:
+            return
+        self._cursor_name = name
+        cur = self.skin.cursor(name) if name else None
+        self.setCursor(cur) if cur is not None else self.unsetCursor()
 
     def _has_eqex(self):
         """Does this skin ship eq_ex.bmp (the windowshade titlebar)? Cached."""
@@ -585,6 +605,8 @@ class SkinnedEqWindow(QWidget):
             return
         if self._drag is not None:
             self._set_from_y(self._drag, (event.position() / self._scale()).y())
+        else:
+            self._update_cursor((event.position() / self._scale()).toPoint())
 
     def mouseReleaseEvent(self, event):
         if getattr(self, '_titledrag', False):
