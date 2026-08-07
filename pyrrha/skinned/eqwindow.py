@@ -39,6 +39,12 @@ PRESETS_BTN = QRect(217, 18, 44, 12)   # opens the preset menu; sprite at (224,1
 MIN_BTN = QRect(254, 3, 9, 9)     # windowshade: collapse to the title bar
 CLOSE_BTN = QRect(264, 3, 9, 9)   # close (hide) the panel
 
+# EQ_EX.BMP: the equalizer's dedicated windowshade titlebar (distinct from the
+# full-window titlebar in eqmain.bmp — decorative bars + groove, no "EQUALIZER"
+# text). Active row at y=0, inactive at y=15; each 275x14. Skins may omit it.
+EQEX = 'eq_ex.bmp'
+EQEX_TB_ACTIVE, EQEX_TB_INACTIVE = 0, 15
+
 DB_RANGE = 12.0             # slider maps +/- this many dB (middle = 0)
 DB_MIN, DB_MAX = -24.0, 12.0  # element's actual limits
 
@@ -133,6 +139,7 @@ class SkinnedEqWindow(QWidget):
         self._collapsed = False
         self._closed = False
         self._well_cache = {}       # frame index -> magenta-keyed QImage
+        self._eqex_present = None    # does this skin ship the windowshade titlebar?
         self._wells_present = None   # does this skin have slider wells?
         self._well_offset = None     # x offset to center the well under the thumb
         self._curve_colors_cache = None   # per-row EQ response-curve colors
@@ -151,10 +158,18 @@ class SkinnedEqWindow(QWidget):
     def set_skin(self, skin):
         self.skin = skin
         self._well_cache = {}
+        self._eqex_present = None
         self._wells_present = None
         self._well_offset = None
         self._curve_colors_cache = None
         self.update()
+
+    def _has_eqex(self):
+        """Does this skin ship eq_ex.bmp (the windowshade titlebar)? Cached."""
+        if self._eqex_present is None:
+            img = self.skin.image(EQEX)
+            self._eqex_present = img is not None and not img.isNull()
+        return self._eqex_present
 
     # ----------------------------------------------------------- slider wells
     def _has_wells(self):
@@ -391,17 +406,27 @@ class SkinnedEqWindow(QWidget):
         s = self._scale()
         if s != 1:
             p.scale(s, s)
-        p.drawImage(0, 0, self.skin.sprite('eqmain.bmp', 0, 0, W, H))
         active = self.isActiveWindow()
+
+        # Windowshade: the equalizer collapsed to its dedicated compact titlebar.
+        # Winamp ships a distinct graphic for this in eq_ex.bmp (decorative bars +
+        # a recessed groove, no window controls' "EQUALIZER" text); skins that
+        # omit it (e.g. Tenchi) fall back to the full-window titlebar.
+        if self._collapsed:
+            if self._has_eqex():
+                ey = EQEX_TB_ACTIVE if active else EQEX_TB_INACTIVE
+                p.drawImage(0, 0, self.skin.sprite(EQEX, 0, ey, W, TITLE_H))
+            else:
+                p.drawImage(0, 0, self.skin.sprite('eqmain.bmp', 0, 134 if active else 149, W, TITLE_H))
+            p.end()
+            return
+
+        p.drawImage(0, 0, self.skin.sprite('eqmain.bmp', 0, 0, W, H))
         p.drawImage(0, 0, self.skin.sprite('eqmain.bmp', 0, 134 if active else 149, W, TITLE_H))
 
         # Album art fills the area to the right of the (fixed-width) EQ face.
-        if not self._collapsed and self._lw() > W:
+        if self._lw() > W:
             self._paint_album_art(p)
-
-        if self._collapsed:
-            p.end()
-            return
 
         # ON button.
         sx, sy = (69, 119) if self._on else (10, 119)
