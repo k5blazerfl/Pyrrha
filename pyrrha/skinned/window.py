@@ -141,6 +141,10 @@ VIS_MODES = 5
 EGG_SEQUENCE = ('n', 'u', 'l', 'esc', 'l', 'esc', 's', 'o', 'f', 't')
 EGG_MESSAGE = "IT REALLY WHIPS THE LLAMA'S ASS!"
 
+# Keyboard map tuning (classic Winamp): Left/Right seek 5 s, Up/Down one notch.
+SEEK_STEP_NS = 5_000_000_000     # 5 s per arrow-key seek
+KEY_VOL_STEP = 1 / 27.0          # one volume-slider notch per arrow-key press
+
 
 class SkinnedWindow(QWidget):
     def __init__(self, controller, skin, parent=None):
@@ -676,6 +680,16 @@ class SkinnedWindow(QWidget):
             self._vis_mode = (self._vis_mode + 1) % VIS_MODES
             self.update()
 
+    def _set_time_remaining(self, remaining):
+        """Set the display's elapsed/remaining mode (from the Options menu)."""
+        self._time_remaining = bool(remaining)
+        self.update()
+
+    def _set_vis_mode(self, mode):
+        """Set the visualization mode directly (from the Options menu)."""
+        self._vis_mode = mode
+        self.update()
+
     def _kwin_keep_above(self, above):
         """Set the window's keep-above state through KWin's D-Bus scripting
         interface (works on Wayland where the Qt hint is ignored). Returns True
@@ -1091,6 +1105,41 @@ class SkinnedWindow(QWidget):
             menu.addAction(_('Ban'), lambda: c.ban_song())
             menu.addAction(_('Tired'), lambda: c.tired_song())
         menu.addSeparator()
+        # Jump to a track by typing (classic Winamp 'J').
+        jump = menu.addAction(_('Jump to File…') + '\tJ',
+                              lambda: self.window().open_jump_to_file())
+        jump.setEnabled(len(c.songs_model) > 0)
+        # Playback toggles — Options-menu parity with the sprites/clutterbar.
+        shuffle = menu.addAction(_('Shuffle') + '\tS',
+                                 lambda: (c.toggle_shuffle(), self.update()))
+        shuffle.setCheckable(True)
+        shuffle.setChecked(bool(getattr(c, 'shuffle', False)))
+        repeat = menu.addAction(_('Repeat') + '\tR',
+                                lambda: (c.toggle_repeat(), self.update()))
+        repeat.setCheckable(True)
+        repeat.setChecked(bool(getattr(c, 'repeat', False)))
+        time_menu = menu.addMenu(_('Time'))
+        el = time_menu.addAction(_('Elapsed'), lambda: self._set_time_remaining(False))
+        el.setCheckable(True)
+        el.setChecked(not self._time_remaining)
+        rem = time_menu.addAction(_('Remaining'), lambda: self._set_time_remaining(True))
+        rem.setCheckable(True)
+        rem.setChecked(self._time_remaining)
+        vis_menu = menu.addMenu(_('Visualization'))
+        for vlabel, vmode in ((_('Bars'), VIS_BARS_MODE), (_('Lines'), VIS_LINES),
+                              (_('Dots'), VIS_DOTS), (_('Oscilloscope'), VIS_SCOPE),
+                              (_('Off'), VIS_OFF)):
+            a = vis_menu.addAction(vlabel, lambda *args, m=vmode: self._set_vis_mode(m))
+            a.setCheckable(True)
+            a.setChecked(self._vis_mode == vmode)
+        top = menu.addAction(_('Always on Top') + '\tCtrl+A',
+                             lambda: self._clutter_action('A', None))
+        top.setCheckable(True)
+        top.setChecked(getattr(self.window(), 'keep_above', False))
+        shade = menu.addAction(_('Windowshade'), self._toggle_shade)
+        shade.setCheckable(True)
+        shade.setChecked(self._collapsed)
+        menu.addSeparator()
         # Size (uniform scale) is a Classic-mode concern; Modern resizes by
         # widening for the album art instead.
         if getattr(self.window(), 'mode', 'modern') == 'classic':
@@ -1187,6 +1236,7 @@ class SkinnedShell(QWidget):
         self.mode = controller.get_skin_mode() if hasattr(controller, 'get_skin_mode') else 'modern'
         self.keep_above = False   # clutterbar "A" (KWin keep-above)
         self._activated_at = 0.0  # when the window last became active (click-to-focus)
+        self._jump_dlg = None     # lazily-built Jump-to-File dialog (classic 'J')
         # Classic tear-off layout: each panel's *absolute* logical position inside
         # the screen-sized overlay ({'main'|'eq'|'pl': [x, y]}). Absolute (not
         # relative to main) so a torn-off panel stays put when the main window is
@@ -1868,7 +1918,88 @@ class SkinnedShell(QWidget):
         if self.main is not None and self.main.egg_key(event):
             event.accept()
             return
+        # Classic Winamp keyboard map (transport, seek, volume, jump-to-file).
+        if self._dispatch_shortcut(event):
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _dispatch_shortcut(self, event):
+        """The classic Winamp keyboard map. Returns True if the key was handled.
+        Runs after playlist navigation (so arrows still drive the list when it's
+        open) and after the easter-egg matcher (so 's'/'l' feed a live egg
+        sequence before acting)."""
+        c = self.ctl
+        key = event.key()
+        mods = event.modifiers()
+        if mods & Qt.ControlModifier:
+            if key == Qt.Key_D:            # Ctrl+D: double-size toggle (Classic)
+                self.toggle_scale()
+                return True
+            if key == Qt.Key_P:            # Ctrl+P: preferences
+                c.show_preferences()
+                return True
+            if key == Qt.Key_A:            # Ctrl+A: always-on-top
+                if self.main is not None:
+                    self.main._clutter_action('A', None)
+                return True
+            return False                   # leave other Ctrl combos alone
+        if mods & (Qt.AltModifier | Qt.MetaModifier):
+            return False                   # Alt+S etc. handled above
+        # Seek (Left/Right) and volume (Up/Down). Arrows reach here only when the
+        # playlist did not already consume them for row navigation.
+        if key == Qt.Key_Left:
+            self._key_seek(-SEEK_STEP_NS)
+            return True
+        if key == Qt.Key_Right:
+            self._key_seek(SEEK_STEP_NS)
+            return True
+        if key == Qt.Key_Up:
+            if self.main is not None:
+                self.main.change_volume(KEY_VOL_STEP)
+            return True
+        if key == Qt.Key_Down:
+            if self.main is not None:
+                self.main.change_volume(-KEY_VOL_STEP)
+            return True
+        text = event.text().lower()
+        if len(text) != 1:
+            return False
+        transport = {'z': c.prev_song, 'x': c.user_play, 'c': c.user_playpause,
+                     'v': c.stop, 'b': c.next_song, 'l': c.open_local_files}
+        if text in transport:
+            transport[text]()
+            return True
+        if text == 's':                    # shuffle (local play order)
+            c.toggle_shuffle()
+            self._repaint_panels()
+            return True
+        if text == 'r':                    # repeat (local play order)
+            c.toggle_repeat()
+            self._repaint_panels()
+            return True
+        if text == 'j':                    # jump to file
+            self.open_jump_to_file()
+            return True
+        return False
+
+    def _key_seek(self, delta_ns):
+        """Seek the current track by a relative amount (no-op for Pandora, which
+        is not seekable)."""
+        c = self.ctl
+        if not c.seekable():
+            return
+        pos = c.query_position() or 0
+        c.seek(pos + delta_ns)
+        if self.main is not None:
+            self.main.update()
+
+    def open_jump_to_file(self):
+        """Open (or re-focus) the classic Winamp 'Jump to File' quick-search."""
+        from .jumpto import JumpToFileDialog
+        if self._jump_dlg is None:
+            self._jump_dlg = JumpToFileDialog(self.ctl, self)
+        self._jump_dlg.popup()
 
     def toggle_width(self):
         """Widen the player to reveal the album art beside the EQ (a square),
