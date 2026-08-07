@@ -1222,6 +1222,18 @@ class SkinnedShell(QWidget):
         self.pl = SkinnedPlaylistWindow(controller, self.skin, parent=self) if self.skin.has('pledit.bmp') else None
         self.relayout()
 
+        # Track the monitor layout: the classic overlay spans the whole virtual
+        # desktop, so a hot-plugged/removed display must regrow and re-anchor it.
+        self._anchored_once = False
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.screenAdded.connect(self._on_screens_changed)
+            app.screenRemoved.connect(self._on_screens_changed)
+            app.primaryScreenChanged.connect(self._on_screens_changed)
+        scr = self.screen() or QGuiApplication.primaryScreen()
+        if scr is not None:
+            scr.virtualGeometryChanged.connect(self._on_screens_changed)
+
     def _load_modern_skin(self):
         """The bundled Glare skin used by Modern mode (or None if unavailable)."""
         try:
@@ -1273,8 +1285,7 @@ class SkinnedShell(QWidget):
         self.relayout()
         self._repaint_panels()
         if mode == 'classic':
-            scr = self._avail_geom()
-            tx, ty = (scr.x(), scr.y()) if scr is not None else (0, 0)
+            tx, ty = self._overlay_origin()   # top-left of the whole virtual desktop
         elif old_player is not None:
             tx, ty = self._clamp_on_screen(old_player.x(), old_player.y())
         else:
@@ -1424,9 +1435,55 @@ class SkinnedShell(QWidget):
         scr = self.screen() or QGuiApplication.primaryScreen()
         return scr.availableGeometry() if scr is not None else None
 
+    def _virtual_geom(self):
+        """The rect the classic overlay spans: the bounding box of every
+        monitor's *available* area (excludes panels/taskbars). For a single
+        screen this is just its available geometry (unchanged behavior); with
+        several monitors it grows to cover them all so panels can be dragged
+        across displays."""
+        rects = [s.availableGeometry() for s in QGuiApplication.screens()]
+        if not rects:
+            scr = self.screen() or QGuiApplication.primaryScreen()
+            return scr.virtualGeometry() if scr is not None else None
+        r = rects[0]
+        for x in rects[1:]:
+            r = r.united(x)
+        return r
+
+    def _overlay_origin(self):
+        """Global top-left that the overlay's local (0,0) maps to — the virtual
+        desktop's top-left, which is negative when a monitor sits left of / above
+        the primary. Panel positions are stored relative to this."""
+        vg = self._virtual_geom()
+        return (vg.x(), vg.y()) if vg is not None else (0, 0)
+
     def _overlay_size(self):
-        scr = self._avail_geom()
-        return (scr.width(), scr.height()) if scr is not None else (2000, 1500)
+        vg = self._virtual_geom()
+        return (vg.width(), vg.height()) if vg is not None else (2000, 1500)
+
+    def _screen_rects_local(self):
+        """Each monitor's available rect in overlay-local coords (edge snapping)."""
+        ox, oy = self._overlay_origin()
+        return [s.availableGeometry().translated(-ox, -oy) for s in QGuiApplication.screens()]
+
+    def _anchor_classic_overlay(self):
+        """Pin the classic overlay's top-left to the virtual-desktop origin so
+        panel-local coordinates line up with real screen pixels. A window sized
+        to the whole virtual desktop would otherwise be placed on a single screen
+        by the WM; this spans it. No-op outside classic mode or on a single screen
+        (there the WM's placement already lands right, as it always has)."""
+        if self.mode != 'classic' or len(QGuiApplication.screens()) <= 1:
+            return
+        ox, oy = self._overlay_origin()
+        self.move(ox, oy)              # honored on X11; a no-op on Wayland
+        self._kwin_reposition(ox, oy)  # Wayland/KDE path (uses the current size)
+
+    def _on_screens_changed(self, *args):
+        """A monitor was added/removed or the desktop was reconfigured: regrow
+        the overlay to the new virtual size and re-anchor it."""
+        if self.mode == 'classic':
+            self.relayout()
+            self._anchor_classic_overlay()
 
     def _classic_reflow(self):
         """Screen-sized overlay layout: size the shell to the whole screen, place
@@ -1483,9 +1540,9 @@ class SkinnedShell(QWidget):
         SNAP_DIST and returns the adjusted position of the dragged panel."""
         thr = SNAP_DIST * self.scale
         externals = [o for o in self._classic_panels() if o not in self._fset]
-        # Overlay-local screen edges: the overlay is the available geometry
-        # placed at its origin, so left/top are 0 and right/bottom are its size.
-        ow, oh = self._overlay_size()
+        # Each monitor's rect in overlay-local coords: panels snap to the edges of
+        # whichever display they're over, so docking works on every screen.
+        screens = self._screen_rects_local()
         best_dx = best_dy = 0
         near_dx = near_dy = thr + 1
         for m in self._fset:
@@ -1507,16 +1564,20 @@ class SkinnedShell(QWidget):
                         d = e - a
                         if abs(d) <= thr and abs(d) < near_dy:
                             near_dy, best_dy = abs(d), d
-            # Screen edges span the whole axis, so no overlap test: snap the
-            # panel's left/right to the screen's left/right, top/bottom likewise.
-            for a, e in ((mv.left(), 0), (mv.right() + 1, ow)):
-                d = e - a
-                if abs(d) <= thr and abs(d) < near_dx:
-                    near_dx, best_dx = abs(d), d
-            for a, e in ((mv.top(), 0), (mv.bottom() + 1, oh)):
-                d = e - a
-                if abs(d) <= thr and abs(d) < near_dy:
-                    near_dy, best_dy = abs(d), d
+            # Monitor edges: snap a panel edge to a display's edge only where the
+            # panel overlaps that display on the other axis (so an edge on one
+            # screen doesn't tug panels sitting on another).
+            for sr in screens:
+                if not (mv.bottom() < sr.top() - thr or mv.top() > sr.bottom() + thr):
+                    for a, e in ((mv.left(), sr.left()), (mv.right() + 1, sr.right() + 1)):
+                        d = e - a
+                        if abs(d) <= thr and abs(d) < near_dx:
+                            near_dx, best_dx = abs(d), d
+                if not (mv.right() < sr.left() - thr or mv.left() > sr.right() + thr):
+                    for a, e in ((mv.top(), sr.top()), (mv.bottom() + 1, sr.bottom() + 1)):
+                        d = e - a
+                        if abs(d) <= thr and abs(d) < near_dy:
+                            near_dy, best_dy = abs(d), d
         return QPoint(dragged_pos.x() + best_dx, dragged_pos.y() + best_dy)
 
     def start_free_drag(self, panel, global_pos):
@@ -1541,17 +1602,16 @@ class SkinnedShell(QWidget):
         delta = QPoint(global_pos) - self._flast
         self._flast = QPoint(global_pos)
         self._fraw += delta
-        # Clamp so the whole moving set stays on-screen (relative to the dragged
-        # panel, whose position is self._fraw).
-        scr = self._avail_geom()
-        if scr is not None:
-            offs = [self._foff[self._panel_role(p)] for p in self._fset]
-            minx = min(o.x() for o in offs)
-            miny = min(o.y() for o in offs)
-            maxx = max(self._foff[self._panel_role(p)].x() + p.width() for p in self._fset)
-            maxy = max(self._foff[self._panel_role(p)].y() + p.height() for p in self._fset)
-            self._fraw.setX(max(-minx, min(scr.width() - maxx, self._fraw.x())))
-            self._fraw.setY(max(-miny, min(scr.height() - maxy, self._fraw.y())))
+        # Clamp so the whole moving set stays within the overlay, which spans the
+        # entire virtual desktop (relative to the dragged panel, at self._fraw).
+        ow, oh = self._overlay_size()
+        offs = [self._foff[self._panel_role(p)] for p in self._fset]
+        minx = min(o.x() for o in offs)
+        miny = min(o.y() for o in offs)
+        maxx = max(self._foff[self._panel_role(p)].x() + p.width() for p in self._fset)
+        maxy = max(self._foff[self._panel_role(p)].y() + p.height() for p in self._fset)
+        self._fraw.setX(max(-minx, min(ow - maxx, self._fraw.x())))
+        self._fraw.setY(max(-miny, min(oh - maxy, self._fraw.y())))
         snapped = self._apply_snap_set(self._fraw)
         for p in self._fset:
             off = self._foff[self._panel_role(p)]
@@ -1874,6 +1934,12 @@ class SkinnedShell(QWidget):
         # Restoring from the tray (hidden -> shown) must repaint the panels, or
         # the album-art area can come back from a stale backing store.
         super().showEvent(event)
+        # Anchor the classic overlay to the virtual-desktop origin the first time
+        # it appears (single-monitor setups land there anyway; multi-monitor ones
+        # need it). Deferred so the size is committed before we move it.
+        if self.mode == 'classic' and not self._anchored_once:
+            self._anchored_once = True
+            QTimer.singleShot(0, self._anchor_classic_overlay)
         self._repaint_panels()
 
     def changeEvent(self, event):
