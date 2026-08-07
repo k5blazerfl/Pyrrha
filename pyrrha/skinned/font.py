@@ -32,15 +32,21 @@ class TextFont:
         return self._map.get(ch.upper(), self._blank)
 
     def render(self, text):
-        """Render ``text`` to a QImage using the skin's TEXT.BMP."""
+        """Render ``text`` to a QImage using the skin's TEXT.BMP. Spaces (and
+        characters the font lacks) are left blank rather than drawn from a
+        'blank' cell, whose position isn't reliably empty across skins."""
         text = text or ''
         width = max(1, len(text) * CHAR_W)
         img = QImage(width, CHAR_H, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         p = QPainter(img)
         for i, ch in enumerate(text):
-            x, y = self._cell(ch)
-            p.drawImage(i * CHAR_W, 0, self.skin.sprite('text.bmp', x, y, CHAR_W, CHAR_H))
+            if ch == ' ':
+                continue
+            cell = self._map.get(ch.upper())
+            if cell is None:
+                continue
+            p.drawImage(i * CHAR_W, 0, self.skin.sprite('text.bmp', cell[0], cell[1], CHAR_W, CHAR_H))
         p.end()
         return img
 
