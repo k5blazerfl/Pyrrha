@@ -1652,6 +1652,12 @@ class SkinnedShell(QWidget):
             self.browse_skins()
             event.accept()
             return
+        # Route navigation keys to the playlist (the shell keeps focus, so this
+        # avoids child focus juggling while letting arrows/Enter/Delete work).
+        if (self.pl is not None and not getattr(self.pl, '_closed', False)
+                and self.pl.handle_key(event)):
+            event.accept()
+            return
         # Feed keys to the classic "nullsoft" easter egg matcher.
         if self.main is not None and self.main.egg_key(event):
             event.accept()

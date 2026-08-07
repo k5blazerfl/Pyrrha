@@ -947,6 +947,21 @@ class PyrrhaWindow(QMainWindow):
         self.song_changed.emit(song)
         self.metadata_changed.emit(song)
 
+    def remove_song(self, row):
+        """Remove a song from the queue (local playback only). Re-indexes the
+        remaining songs and adjusts the current index; removing the playing song
+        stops playback."""
+        if not self.local_mode or not (0 <= row < len(self.songs_model)):
+            return
+        if row == self.current_song_index:
+            self.stop()
+            self.current_song_index = None
+        elif self.current_song_index is not None and row < self.current_song_index:
+            self.current_song_index -= 1
+        self.songs_model.remove_row(row)
+        for r in range(len(self.songs_model)):        # keep song.index == row
+            self.songs_model.song_at(r).index = r
+
     def next_song(self, *ignore):
         if self.current_song_index is None:
             return

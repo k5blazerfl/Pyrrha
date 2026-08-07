@@ -229,6 +229,74 @@ class SkinnedPlaylistWindow(QWidget):
         thumb_y = track_top + int(frac * track_h)
         return QRect(w - FRAME_R + 2, thumb_y, thumb_w, thumb_h), track_top, track_h
 
+    # ------------------------------------------------------- keyboard / actions
+    def handle_key(self, event):
+        """Handle a playlist navigation key; return True if consumed. Called by
+        the shell (which keeps focus) so arrows/Page/Home/End/Enter/Delete work."""
+        if self._collapsed:
+            return False
+        count = len(self._rows())
+        if count == 0:
+            return False
+        key = event.key()
+        base = self._selected if self._selected is not None else (self.ctl.current_song_index or 0)
+        cap = self._capacity()
+        if key == Qt.Key_Up:
+            self._select(base - 1)
+        elif key == Qt.Key_Down:
+            self._select(base + 1)
+        elif key == Qt.Key_PageUp:
+            self._select(base - cap)
+        elif key == Qt.Key_PageDown:
+            self._select(base + cap)
+        elif key == Qt.Key_Home:
+            self._select(0)
+        elif key == Qt.Key_End:
+            self._select(count - 1)
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            self._play_selected()
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._remove_selected()
+        else:
+            return False
+        return True
+
+    def _select(self, idx):
+        """Select a row (keyboard), scroll it into view, and stop auto-follow."""
+        count = len(self._rows())
+        if count == 0:
+            return
+        self._follow = False
+        self._selected = max(0, min(count - 1, int(idx)))
+        cap = self._capacity()
+        if self._selected < self._scroll:
+            self._scroll = self._selected
+        elif self._selected >= self._scroll + cap:
+            self._scroll = self._selected - cap + 1
+        self._scroll = max(0, min(self._scroll, self._max_start()))
+        self.update()
+
+    def _play_selected(self):
+        if self._selected is None:
+            return
+        idx, cur = self._selected, self.ctl.current_song_index
+        if getattr(self.ctl, 'local_mode', False) or (cur is not None and idx > cur):
+            self.ctl.start_song(idx)
+
+    def _remove_selected(self):
+        if self._selected is None or not getattr(self.ctl, 'local_mode', False):
+            return
+        idx = self._selected
+        if hasattr(self.ctl, 'remove_song'):
+            self.ctl.remove_song(idx)
+            count = len(self._rows())
+            self._selected = min(idx, count - 1) if count else None
+            self.update()
+
+    def _scroll_to_current(self):
+        self._follow = True     # re-enable follow: the next paint centres on it
+        self.update()
+
     # -------------------------------------------------------------- paint
     def paintEvent(self, event):
         w = self._lw()
@@ -279,7 +347,13 @@ class SkinnedPlaylistWindow(QWidget):
             mark = RATING_MARK.get(self.ctl.song_icon(song), '')
             text = '{}. {} - {}{}'.format(i + 1, song.artist, song.title, mark)
             p.setPen(self.c_current if i == cur else self.c_normal)   # playing = Current color
-            p.drawText(row.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+            dur = int(song.get_duration_sec() or 0) if hasattr(song, 'get_duration_sec') else 0
+            time_str = _fmt_time(dur) if dur > 0 else ''
+            time_w = 42 if time_str else 0
+            # Title clipped to leave room for the right-aligned duration.
+            p.drawText(row.adjusted(4, 0, -6 - time_w, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+            if time_str:
+                p.drawText(row.adjusted(0, 0, -4, 0), Qt.AlignVCenter | Qt.AlignRight, time_str)
             y += ROW_H
 
         # Track count + total duration in the bottom bar (Winamp shows time here).
@@ -405,20 +479,27 @@ class SkinnedPlaylistWindow(QWidget):
         self.update()
         song = songs[idx]
         c = self.ctl
-        icon = c.song_icon(song)
         menu = QMenu(self)
-        if icon == 'love':
-            menu.addAction(_('Unlove'), lambda: c.unrate_song(song=song))
+        if c.local_mode:
+            menu.addAction(_('Play'), self._play_selected)
+            menu.addAction(_('Remove from Playlist'), self._remove_selected)
         else:
-            menu.addAction(_('Love'), lambda: c.love_song(song=song))
-        if icon == 'ban':
-            menu.addAction(_('Unban'), lambda: c.unrate_song(song=song))
-        else:
-            menu.addAction(_('Ban'), lambda: c.ban_song(song=song))
-        menu.addAction(_('Tired (shelve for a month)'), lambda: c.tired_song(song=song))
-        menu.addSeparator()
-        menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
-        menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+            icon = c.song_icon(song)
+            if icon == 'love':
+                menu.addAction(_('Unlove'), lambda: c.unrate_song(song=song))
+            else:
+                menu.addAction(_('Love'), lambda: c.love_song(song=song))
+            if icon == 'ban':
+                menu.addAction(_('Unban'), lambda: c.unrate_song(song=song))
+            else:
+                menu.addAction(_('Ban'), lambda: c.ban_song(song=song))
+            menu.addAction(_('Tired (shelve for a month)'), lambda: c.tired_song(song=song))
+            menu.addSeparator()
+            menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
+            menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+        if c.current_song_index is not None:
+            menu.addSeparator()
+            menu.addAction(_('Scroll to Now Playing'), self._scroll_to_current)
         menu.exec(event.globalPos())
 
     def mouseMoveEvent(self, event):

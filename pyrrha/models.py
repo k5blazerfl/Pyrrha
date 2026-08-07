@@ -90,6 +90,12 @@ class SongsModel(QAbstractListModel):
         self._rows.append(_Row(song))
         self.endInsertRows()
 
+    def remove_row(self, row):
+        if 0 <= row < len(self._rows):
+            self.beginRemoveRows(QModelIndex(), row, row)
+            del self._rows[row]
+            self.endRemoveRows()
+
     def song_at(self, row):
         if 0 <= row < len(self._rows):
             return self._rows[row].song
