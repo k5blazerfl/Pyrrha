@@ -95,11 +95,19 @@ class SkinnedPlaylistWindow(QWidget):
         self._reorder = False     # a drag-to-reorder is in progress
         self._drop_index = None   # insertion index shown while reordering
         self._mp_scroll = 0       # miniplayer title marquee offset
+        self._mp_pressed = None   # transport button currently shown pressed
+        self._mp_colon = None     # detected baked-':' x in the clock slot (cached)
+        self._drag_scroll_dir = 0  # edge auto-scroll direction while reordering
+        self._drag_last_y = 0     # last cursor y (for auto-scroll drop tracking)
 
         # Marquee tick for the miniplayer title (only repaints while it scrolls).
         self._mp_timer = QTimer(self)
         self._mp_timer.timeout.connect(self._mp_tick)
         self._mp_timer.start(220)
+        # Edge auto-scroll while dragging a row near the list's top/bottom.
+        self._drag_scroll_timer = QTimer(self)
+        self._drag_scroll_timer.setInterval(120)
+        self._drag_scroll_timer.timeout.connect(self._drag_scroll_tick)
 
         # A new song re-enables follow so the view snaps to what's now playing;
         # between songs the user can scroll the list freely.
@@ -117,6 +125,7 @@ class SkinnedPlaylistWindow(QWidget):
         self.skin = skin
         self._apply_pledit_theme(skin)
         self._text_font = TextFont(skin)
+        self._mp_colon = None
         self.update()
 
     def _apply_pledit_theme(self, skin):
@@ -580,7 +589,7 @@ class SkinnedPlaylistWindow(QWidget):
         # Total time: minutes right of the transport, seconds after the baked ':'.
         total = sum(int(s.get_duration_sec() or 0) for s in songs if s is not None)
         if total > 0:
-            gap, y = cx + MP_COLON_X, cy + MP_CLOCK_Y
+            gap, y = cx + self._mp_colon_x(), cy + MP_CLOCK_Y
             x = gap - 2
             for ch in reversed(str(total // 60)):     # MM… right-aligned to the ':'
                 x -= CHAR_W
@@ -589,6 +598,36 @@ class SkinnedPlaylistWindow(QWidget):
             for ch in '%02d' % (total % 60):          # SS left-aligned after the ':'
                 p.drawImage(x, y, self._text_font.render(ch))
                 x += CHAR_W
+        # Pressed-state feedback for the mini transport (a subtle darken; the
+        # glyphs are baked, so there is no skin-supplied pressed sprite).
+        if self._mp_pressed:
+            for name, bx, bw in MP_BTNS:
+                if name == self._mp_pressed:
+                    p.fillRect(cx + bx, cy + MP_BTN_Y, bw, MP_BTN_H, QColor(0, 0, 0, 90))
+                    break
+
+    def _mp_colon_x(self):
+        """The x of the skin's baked time ':' (corner coords), detected once and
+        cached; falls back to the standard position. Skins leave the ':' as the
+        lone small feature in the empty time slot, so we take the centroid of the
+        non-background pixels there when it's a tight, sensibly-placed cluster."""
+        if self._mp_colon is not None:
+            return self._mp_colon
+        colon = MP_COLON_X
+        s = self.skin.sprite('pledit.bmp', 126, 72, 150, 38)
+        if not s.isNull():
+            def lum(c):
+                return (c.red() + c.green() + c.blue()) // 3
+            y0, y1 = MP_CLOCK_Y + 1, MP_CLOCK_Y + 8
+            bg = lum(s.pixelColor(64, MP_CLOCK_Y + 4))   # slot background near the left
+            cols = [x for x in range(62, 106)
+                    if any(abs(lum(s.pixelColor(x, y)) - bg) > 45 for y in range(y0, y1))]
+            if cols and (max(cols) - min(cols)) <= 8:
+                centre = sum(cols) / len(cols)
+                if 68 <= centre <= 98:
+                    colon = round(centre)
+        self._mp_colon = colon
+        return self._mp_colon
 
     def _mini_transport_at(self, pos):
         """Which mini-transport button (prev/play/pause/stop/next/eject) is at
@@ -666,6 +705,8 @@ class SkinnedPlaylistWindow(QWidget):
         # Miniplayer transport buttons (bottom-right corner).
         mt = self._mini_transport_at(pos)
         if mt is not None:
+            self._mp_pressed = mt      # show it pressed until release
+            self.update()
             self._do_transport(mt)
             return
         if pos.y() < TITLE_H:
@@ -762,7 +803,9 @@ class SkinnedPlaylistWindow(QWidget):
                     self._select(self._press_row)
                 self._deferred_select = None
             if self._reorder:
+                self._drag_last_y = pos.y()
                 self._drop_index = self._drop_index_at(pos.y())
+                self._update_edge_autoscroll(pos.y())
                 self.update()
             return
         if self._resizing:
@@ -780,6 +823,9 @@ class SkinnedPlaylistWindow(QWidget):
                 self.window().relayout()
 
     def mouseReleaseEvent(self, event):
+        if self._mp_pressed:                       # release the mini-transport button
+            self._mp_pressed = None
+            self.update()
         if getattr(self, '_titledrag', False):
             self._titledrag = False
             self.window().end_free_drag()
@@ -818,6 +864,34 @@ class SkinnedPlaylistWindow(QWidget):
         self._press_row = self._press_pos = self._deferred_select = None
         self._reorder = False
         self._drop_index = None
+        self._drag_scroll_dir = 0
+        self._drag_scroll_timer.stop()
+
+    def _update_edge_autoscroll(self, y):
+        """Start/stop edge auto-scroll: dragging within a row of the list's top
+        or bottom scrolls the list so you can drop beyond the visible rows."""
+        top = LIST_TOP
+        bottom = self._lh() - (FRAME_B if self._frame_on() else 6)
+        if y < top + ROW_H:
+            self._drag_scroll_dir = -1
+        elif y > bottom - ROW_H:
+            self._drag_scroll_dir = 1
+        else:
+            self._drag_scroll_dir = 0
+        if self._drag_scroll_dir and not self._drag_scroll_timer.isActive():
+            self._drag_scroll_timer.start()
+        elif not self._drag_scroll_dir and self._drag_scroll_timer.isActive():
+            self._drag_scroll_timer.stop()
+
+    def _drag_scroll_tick(self):
+        if not self._reorder or not self._drag_scroll_dir:
+            self._drag_scroll_timer.stop()
+            return
+        before = self._scroll
+        self._scroll_by(self._drag_scroll_dir)
+        if self._scroll != before:        # actually moved -> update the drop marker
+            self._drop_index = self._drop_index_at(self._drag_last_y)
+            self.update()
 
     def wheelEvent(self, event):
         # Over a scrollable list the wheel scrolls it; otherwise fall through to
