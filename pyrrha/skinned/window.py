@@ -84,6 +84,15 @@ BUTTONS = [
 ]
 
 TITLEBAR = (0, 0, 275, 14)          # dest; src active (27,0), inactive (27,15)
+# Windowshade titlebar: src active (27,29), inactive (27,44). It bakes the title
+# label, a black display (seek + a ':' time slot at x144) and the mini transport;
+# we scroll the song title in the display and draw the elapsed time on the ':'.
+WS_TB_ACTIVE, WS_TB_INACTIVE = 29, 44
+WS_TITLE = (79, 4, 52)              # scrolling-title area in the shade display
+WS_COLON_X, WS_TIME_Y = 144, 4      # baked ':' x and the mini-time baseline
+WS_BTN_Y, WS_BTN_H = 1, 12          # windowshade mini-transport row
+WS_BTNS = (('prev', 162, 11), ('play', 174, 12), ('pause', 187, 12),
+           ('stop', 200, 11), ('next', 212, 12), ('eject', 225, 13))
 MENU = QRect(6, 3, 9, 9)            # top-left main-menu (options) button
 CLOSE = QRect(264, 3, 9, 9)
 # Main title bar buttons: minimize (to taskbar) and windowshade (collapse).
@@ -145,6 +154,8 @@ class SkinnedWindow(QWidget):
 
         self._collapsed = False   # windowshade: collapsed to the title bar
         self._pressed = None      # currently-held transport button
+        self._ws_pressed = None   # windowshade mini-transport button held
+        self._ws_colon = None     # detected windowshade ':' (x, draw_own), cached
         self._vol_dragging = False
         self._bal_dragging = False
         self._seek_dragging = False   # scrubbing the position bar (local files)
@@ -291,6 +302,7 @@ class SkinnedWindow(QWidget):
     # ---------------------------------------------------------------- helpers
     def set_skin(self, skin):
         self.skin = skin
+        self._ws_colon = None
         self.text_font = TextFont(skin)
         self.num_font = NumberFont(skin)
         self._vis_colors = self._load_vis_colors()   # also refreshes accent/peak
@@ -379,8 +391,8 @@ class SkinnedWindow(QWidget):
             p.scale(s, s)   # everything below is drawn in logical coords
 
         lw = self._lw()
-        if self._collapsed:   # windowshade: draw only the title bar
-            self._paint_titlebar(p, lw)
+        if self._collapsed:   # windowshade: compact title + time display
+            self._paint_windowshade(p, lw)
             p.end()
             return
         gap = lw - W        # extra width to fill (0 at native size)
@@ -472,6 +484,71 @@ class SkinnedWindow(QWidget):
         p.drawImage(REPEAT.x(), REPEAT.y(), self.skin.sprite(
             'shufrep.bmp', 0, 30 if getattr(self.ctl, 'repeat', False) else 0, 28, 15))
         p.end()
+
+    def _paint_windowshade(self, p, lw):
+        """Winamp windowshade: the compact titlebar with the song title scrolling
+        in its display and the elapsed time on the baked ':'. The skin bakes the
+        transport/buttons; a wider (Modern) shade just shows the normal titlebar."""
+        if lw != W:                       # only the native compact bar has the display
+            self._paint_titlebar(p, lw)
+            return
+        ws_ty = WS_TB_ACTIVE if self.isActiveWindow() else WS_TB_INACTIVE
+        p.drawImage(0, 0, self.skin.sprite('titlebar.bmp', 27, ws_ty, W, 14))
+        # Scrolling title over the skin's own display area (its bg shows through
+        # the font's transparency, so it looks native on light and dark shades).
+        tx, ty, tw = WS_TITLE
+        img = self.text_font.render(self._title_text() + '   ***   ')
+        p.save()
+        p.setClipRect(tx, ty, tw, CHAR_H)
+        if img.width() > tw:
+            span = img.width()
+            off = self._scroll % span
+            p.drawImage(tx - off, ty, img)
+            p.drawImage(tx - off + span, ty, img)
+        else:
+            p.drawImage(tx, ty, img)
+        p.restore()
+        # Elapsed time as digits straddling the ':'. We always draw our own ':'
+        # at the (detected) slot x: where the skin bakes one it aligns and reads
+        # as a single ':'; where it doesn't (some skins), ours fills it in.
+        tstr, _rem = self._time_display()
+        mm, ss = (tstr[:2].lstrip('0') or '0'), tstr[2:]
+        if ss.strip():
+            colon_x = self._ws_colon_x()
+            x = colon_x - 2
+            for ch in reversed(mm):
+                x -= CHAR_W
+                p.drawImage(x, WS_TIME_Y, self.text_font.render(ch))
+            p.drawImage(colon_x - 2, WS_TIME_Y, self.text_font.render(':'))
+            x = colon_x + 3
+            for ch in ss:
+                p.drawImage(x, WS_TIME_Y, self.text_font.render(ch))
+                x += CHAR_W
+        # Pressed-state feedback for a mini-transport button (baked glyphs).
+        if self._ws_pressed:
+            for name, bx, bw in WS_BTNS:
+                if name == self._ws_pressed:
+                    p.fillRect(bx, WS_BTN_Y, bw, WS_BTN_H, QColor(0, 0, 0, 90))
+                    break
+
+    def _ws_colon_x(self):
+        """The x of the windowshade time ':' — the skin's baked one when there's a
+        clear tight feature at the standard slot, else the standard x. Cached; we
+        draw our own ':' there regardless, so this only fine-tunes alignment."""
+        if self._ws_colon is None:
+            colon_x = WS_COLON_X
+            s = self.skin.sprite('titlebar.bmp', 27, WS_TB_ACTIVE, W, 14)
+            if not s.isNull():
+                def contrast(x):
+                    band = [(s.pixelColor(x, y).red() + s.pixelColor(x, y).green()
+                             + s.pixelColor(x, y).blue()) // 3 for y in range(2, 12)]
+                    return max(band) - min(band)
+                peak = max(range(WS_COLON_X - 3, WS_COLON_X + 4), key=contrast)
+                nb = sorted(contrast(WS_COLON_X + d) for d in (-8, -7, -6, 6, 7, 8))
+                if contrast(peak) >= nb[len(nb) // 2] + 25:   # a clear standout ':'
+                    colon_x = peak
+            self._ws_colon = colon_x
+        return self._ws_colon
 
     def _paint_titlebar(self, p, lw):
         ty = 0 if self.isActiveWindow() else 15
@@ -694,6 +771,28 @@ class SkinnedWindow(QWidget):
                 return name
         return None
 
+    def _ws_transport_at(self, pos):
+        """Which windowshade mini-transport button is at ``pos``, or None."""
+        if WS_BTN_Y <= pos.y() <= WS_BTN_Y + WS_BTN_H:
+            for name, bx, bw in WS_BTNS:
+                if bx <= pos.x() < bx + bw:
+                    return name
+        return None
+
+    def _do_ws_transport(self, name):
+        # Reuse the normal transport logic so behaviour stays in lockstep. Only
+        # Pandora-mode eject needs a shade-specific anchor for its station menu
+        # (the full-window eject button is hidden while collapsed).
+        if name == 'eject' and not self.ctl.local_mode:
+            s = self._scale()
+            for n, bx, bw in WS_BTNS:
+                if n == 'eject':
+                    self._show_stations_menu(self.mapToGlobal(
+                        QPoint(int(bx * s), int((WS_BTN_Y + WS_BTN_H) * s))))
+                    break
+            return
+        self._activate(name)
+
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
@@ -719,6 +818,13 @@ class SkinnedWindow(QWidget):
         if SHADE_BTN.translated(dx, 0).contains(pos):
             self._toggle_shade()
             return
+        if self._collapsed:                    # windowshade mini-transport
+            wt = self._ws_transport_at(pos)
+            if wt is not None:
+                self._ws_pressed = wt
+                self.update()
+                self._do_ws_transport(wt)
+                return
         if EQ_TOGGLE.translated(dx, 0).contains(pos):
             self.window().toggle_panel(getattr(self.window(), 'eq', None))
             return
@@ -795,6 +901,9 @@ class SkinnedWindow(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._ws_pressed:                   # release windowshade mini-transport
+            self._ws_pressed = None
+            self.update()
         if getattr(self, '_titledrag', False):
             self._titledrag = False
             self.window().end_free_drag()
