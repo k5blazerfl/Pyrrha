@@ -426,6 +426,14 @@ class PyrrhaWindow(QMainWindow):
         self.skinned_shell.activateWindow()
         return True
 
+    def show_skinned_view_mode(self, mode):
+        """Enter the skinned UI directly in a specific mode ('classic' = WinAMP
+        2.x, 'modern' = Pyrrha). Sets the saved mode first so a freshly built
+        shell opens there, then switches an already-built shell to match."""
+        self.set_skin_mode(mode)
+        if self.show_skinned_view(force_modern=False) and self.skinned_shell is not None:
+            self.skinned_shell.set_mode(mode)
+
     def _build_skinned_shell(self, force_modern=True):
         """Create the Winamp-skinned shell on demand from the last-used skin, or
         the first available one (bundled or in the user's skins dir). Returns
@@ -463,7 +471,11 @@ class PyrrhaWindow(QMainWindow):
         menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
         menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
         menu.addSeparator()
-        self._skin_action = menu.addAction(_('Skinned Mode'), self.show_skinned_view)
+        # Match the skinned window's UI submenu: offer the skinned modes you can
+        # switch to (Pithos is the current view here, so it's not listed).
+        ui_menu = menu.addMenu(_('UI'))
+        ui_menu.addAction(_('WinAMP 2.x'), lambda: self.show_skinned_view_mode('classic'))
+        ui_menu.addAction(_('Pyrrha'), lambda: self.show_skinned_view_mode('modern'))
         menu.addSeparator()
         menu.addAction(_('Help'), lambda: self.open_url('https://github.com/k5blazerfl/Pyrrha'))
         menu.addAction(_('About'), self.show_about)
