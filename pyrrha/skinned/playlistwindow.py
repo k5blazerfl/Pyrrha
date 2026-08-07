@@ -73,7 +73,9 @@ class SkinnedPlaylistWindow(QWidget):
         self._scroll = 0          # top visible row when browsing manually
         self._follow = True       # auto-scroll to keep the current song visible
         self._sb_drag = None      # scrollbar thumb drag: cursor-to-thumb-top offset
-        self._selected = None     # click-selected row (highlight, distinct from playing)
+        self._selection = set()   # selected rows (multi-select), distinct from playing
+        self._focus = None        # row the keyboard acts on / scrolls to
+        self._anchor = None       # anchor row for shift-range selection
 
         # A new song re-enables follow so the view snaps to what's now playing;
         # between songs the user can scroll the list freely.
@@ -178,7 +180,8 @@ class SkinnedPlaylistWindow(QWidget):
         self.update()
 
     def _on_model_reset(self, *ignore):
-        self._selected = None    # a new list (e.g. station switch) clears selection
+        self._selection = set()  # a new list (e.g. station switch) clears selection
+        self._focus = self._anchor = None
         self.update()
 
     def _capacity(self):
@@ -229,6 +232,174 @@ class SkinnedPlaylistWindow(QWidget):
         thumb_y = track_top + int(frac * track_h)
         return QRect(w - FRAME_R + 2, thumb_y, thumb_w, thumb_h), track_top, track_h
 
+    # ------------------------------------------------------- keyboard / actions
+    def handle_key(self, event):
+        """Handle a playlist navigation key; return True if consumed. Called by
+        the shell (which keeps focus) so arrows/Page/Home/End/Enter/Delete work."""
+        if self._collapsed:
+            return False
+        count = len(self._rows())
+        if count == 0:
+            return False
+        key = event.key()
+        ext = bool(event.modifiers() & Qt.ShiftModifier)   # Shift extends selection
+        base = self._focus if self._focus is not None else (self.ctl.current_song_index or 0)
+        cap = self._capacity()
+        if key == Qt.Key_Up:
+            self._select(base - 1, extend=ext)
+        elif key == Qt.Key_Down:
+            self._select(base + 1, extend=ext)
+        elif key == Qt.Key_PageUp:
+            self._select(base - cap, extend=ext)
+        elif key == Qt.Key_PageDown:
+            self._select(base + cap, extend=ext)
+        elif key == Qt.Key_Home:
+            self._select(0, extend=ext)
+        elif key == Qt.Key_End:
+            self._select(count - 1, extend=ext)
+        elif key in (Qt.Key_Return, Qt.Key_Enter):
+            self._play_focus()
+        elif key in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._remove_selection()
+        else:
+            return False
+        return True
+
+    def _select(self, idx, extend=False, toggle=False):
+        """Update the selection for a row and scroll it into view. ``extend``
+        (Shift) selects the range from the anchor; ``toggle`` (Ctrl) flips the
+        row; otherwise it becomes the sole selection."""
+        count = len(self._rows())
+        if count == 0:
+            return
+        idx = max(0, min(count - 1, int(idx)))
+        if toggle:
+            self._selection ^= {idx}
+            self._anchor = idx
+        elif extend and self._anchor is not None:
+            lo, hi = sorted((self._anchor, idx))
+            self._selection = set(range(lo, hi + 1))
+        else:
+            self._selection = {idx}
+            self._anchor = idx
+        self._focus = idx
+        self._follow = False
+        cap = self._capacity()
+        if idx < self._scroll:
+            self._scroll = idx
+        elif idx >= self._scroll + cap:
+            self._scroll = idx - cap + 1
+        self._scroll = max(0, min(self._scroll, self._max_start()))
+        self.update()
+
+    def _play_focus(self):
+        if self._focus is None:
+            return
+        idx, cur = self._focus, self.ctl.current_song_index
+        if getattr(self.ctl, 'local_mode', False) or (cur is not None and idx > cur):
+            self.ctl.start_song(idx)
+
+    def _remove_selection(self):
+        if not self._selection or not getattr(self.ctl, 'local_mode', False):
+            return
+        rows = sorted(self._selection)
+        self.ctl.remove_songs(rows)
+        first = rows[0]
+        count = len(self._rows())
+        self._selection = {min(first, count - 1)} if count else set()
+        self._focus = self._anchor = (min(first, count - 1) if count else None)
+        self.update()
+
+    def _crop_to_selection(self):
+        if not self._selection or not getattr(self.ctl, 'local_mode', False):
+            return
+        keep = self._selection
+        drop = [i for i in range(len(self._rows())) if i not in keep]
+        self.ctl.remove_songs(drop)
+        self._selection = set(range(len(self._rows())))
+        self._focus = self._anchor = 0 if self._rows() else None
+        self.update()
+
+    def _select_all(self):
+        self._selection = set(range(len(self._rows())))
+        self.update()
+
+    def _select_none(self):
+        self._selection = set()
+        self.update()
+
+    def _invert_selection(self):
+        self._selection = set(range(len(self._rows()))) - self._selection
+        self.update()
+
+    def _clear_playlist(self):
+        if getattr(self.ctl, 'local_mode', False):
+            self.ctl.clear_playlist()
+            self._selection = set()
+            self._focus = self._anchor = None
+            self.update()
+
+    # ---------------------------------------------------- bottom button bar
+    def _bottom_button_at(self, pos):
+        """Which bottom-bar button (add/rem/sel/misc/list) is at ``pos``, or None.
+        Regions match the classic PLEDIT corner sprites (4 buttons left, List
+        right)."""
+        if not self._frame_on():
+            return None
+        lh, w = self._lh(), self._lw()
+        by = lh - FRAME_B
+        if not (by + 4 <= pos.y() <= by + 32):
+            return None
+        for name, x0 in (('add', 11), ('rem', 40), ('sel', 69), ('misc', 98)):
+            if x0 <= pos.x() < x0 + 24:
+                return name
+        if w - 46 <= pos.x() < w - 20:
+            return 'list'
+        return None
+
+    def _show_bottom_menu(self, btn, gpos):
+        c = self.ctl
+        local = getattr(c, 'local_mode', False)
+        have_sel = bool(self._selection)
+        m = QMenu(self)
+        if btn == 'add':
+            if local:
+                m.addAction(_('Add Files…'), c.open_local_files)
+                m.addAction(_('Add Folder…'), c.open_local_folder)
+            else:
+                m.addAction(_('Switch to Local Playback'), c.switch_to_local)
+        elif btn == 'rem':
+            a = m.addAction(_('Remove Selected'), self._remove_selection)
+            a.setEnabled(local and have_sel)
+            a = m.addAction(_('Crop (keep selected)'), self._crop_to_selection)
+            a.setEnabled(local and have_sel)
+            a = m.addAction(_('Remove All'), self._clear_playlist)
+            a.setEnabled(local and len(self._rows()) > 0)
+        elif btn == 'sel':
+            m.addAction(_('Select All'), self._select_all)
+            m.addAction(_('Select None'), self._select_none)
+            m.addAction(_('Invert Selection'), self._invert_selection)
+        elif btn == 'misc':
+            srt = m.addMenu(_('Sort List'))
+            srt.setEnabled(local and len(self._rows()) > 1)
+            srt.addAction(_('By Title'), lambda: c.sort_songs('title'))
+            srt.addAction(_('By Artist'), lambda: c.sort_songs('artist'))
+            srt.addAction(_('Reverse'), lambda: c.sort_songs('reverse'))
+            srt.addAction(_('Randomize'), lambda: c.sort_songs('random'))
+        elif btn == 'list':
+            a = m.addAction(_('New Playlist'), self._clear_playlist)
+            a.setEnabled(local)
+            a = m.addAction(_('Load Playlist…'), c.open_playlist)
+            a.setEnabled(local)
+            a = m.addAction(_('Save Playlist…'), c.save_playlist)
+            a.setEnabled(len(self._rows()) > 0)
+        if m.actions():
+            m.exec(gpos)
+
+    def _scroll_to_current(self):
+        self._follow = True     # re-enable follow: the next paint centres on it
+        self.update()
+
     # -------------------------------------------------------------- paint
     def paintEvent(self, event):
         w = self._lw()
@@ -274,12 +445,18 @@ class SkinnedPlaylistWindow(QWidget):
             if song is None:
                 continue
             row = QRect(li, y, w - li - ri, ROW_H)
-            if i == self._selected:              # click-selection highlight
+            if i in self._selection:             # selection highlight
                 p.fillRect(row, self.c_sel)
             mark = RATING_MARK.get(self.ctl.song_icon(song), '')
             text = '{}. {} - {}{}'.format(i + 1, song.artist, song.title, mark)
             p.setPen(self.c_current if i == cur else self.c_normal)   # playing = Current color
-            p.drawText(row.adjusted(4, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+            dur = int(song.get_duration_sec() or 0) if hasattr(song, 'get_duration_sec') else 0
+            time_str = _fmt_time(dur) if dur > 0 else ''
+            time_w = 42 if time_str else 0
+            # Title clipped to leave room for the right-aligned duration.
+            p.drawText(row.adjusted(4, 0, -6 - time_w, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+            if time_str:
+                p.drawText(row.adjusted(0, 0, -4, 0), Qt.AlignVCenter | Qt.AlignRight, time_str)
             y += ROW_H
 
         # Track count + total duration in the bottom bar (Winamp shows time here).
@@ -372,6 +549,11 @@ class SkinnedPlaylistWindow(QWidget):
                 else:
                     self._scroll_by(self._capacity())
                 return
+        # Bottom-bar buttons (Add / Rem / Sel / Misc / List).
+        btn = self._bottom_button_at(pos)
+        if btn is not None:
+            self._show_bottom_menu(btn, event.globalPosition().toPoint())
+            return
         if pos.y() < TITLE_H:
             shell = self.window()
             # Classic: tear the playlist off the stack (magnetically re-snaps).
@@ -384,11 +566,12 @@ class SkinnedPlaylistWindow(QWidget):
                 if handle is not None:
                     handle.startSystemMove()
             return
-        # Click in the list selects the row under the cursor.
+        # Click in the list selects the row (Ctrl toggles, Shift extends a range).
         idx = self._song_index_at(pos.y())
         if idx is not None:
-            self._selected = idx
-            self.update()
+            mods = event.modifiers()
+            self._select(idx, extend=bool(mods & Qt.ShiftModifier),
+                         toggle=bool(mods & Qt.ControlModifier))
 
     def contextMenuEvent(self, event):
         if self._collapsed:
@@ -401,24 +584,36 @@ class SkinnedPlaylistWindow(QWidget):
         songs = self._rows()
         if idx is None or not (0 <= idx < len(songs)) or songs[idx] is None:
             return
-        self._selected = idx     # highlight the row the menu acts on
-        self.update()
+        # Act on the existing selection if the row is in it; otherwise select it.
+        if idx not in self._selection:
+            self._select(idx)
+        else:
+            self._focus = idx
+            self.update()
         song = songs[idx]
         c = self.ctl
-        icon = c.song_icon(song)
         menu = QMenu(self)
-        if icon == 'love':
-            menu.addAction(_('Unlove'), lambda: c.unrate_song(song=song))
+        if c.local_mode:
+            menu.addAction(_('Play'), self._play_focus)
+            rem = menu.addAction(_('Remove Selected'), self._remove_selection)
+            rem.setEnabled(bool(self._selection))
         else:
-            menu.addAction(_('Love'), lambda: c.love_song(song=song))
-        if icon == 'ban':
-            menu.addAction(_('Unban'), lambda: c.unrate_song(song=song))
-        else:
-            menu.addAction(_('Ban'), lambda: c.ban_song(song=song))
-        menu.addAction(_('Tired (shelve for a month)'), lambda: c.tired_song(song=song))
-        menu.addSeparator()
-        menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
-        menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+            icon = c.song_icon(song)
+            if icon == 'love':
+                menu.addAction(_('Unlove'), lambda: c.unrate_song(song=song))
+            else:
+                menu.addAction(_('Love'), lambda: c.love_song(song=song))
+            if icon == 'ban':
+                menu.addAction(_('Unban'), lambda: c.unrate_song(song=song))
+            else:
+                menu.addAction(_('Ban'), lambda: c.ban_song(song=song))
+            menu.addAction(_('Tired (shelve for a month)'), lambda: c.tired_song(song=song))
+            menu.addSeparator()
+            menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
+            menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+        if c.current_song_index is not None:
+            menu.addSeparator()
+            menu.addAction(_('Scroll to Now Playing'), self._scroll_to_current)
         menu.exec(event.globalPos())
 
     def mouseMoveEvent(self, event):

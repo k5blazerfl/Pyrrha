@@ -90,6 +90,20 @@ class SongsModel(QAbstractListModel):
         self._rows.append(_Row(song))
         self.endInsertRows()
 
+    def remove_row(self, row):
+        if 0 <= row < len(self._rows):
+            self.beginRemoveRows(QModelIndex(), row, row)
+            del self._rows[row]
+            self.endRemoveRows()
+
+    def reorder(self, order):
+        """Rearrange rows to the given permutation of current row indices."""
+        if sorted(order) != list(range(len(self._rows))):
+            return
+        self.beginResetModel()
+        self._rows = [self._rows[i] for i in order]
+        self.endResetModel()
+
     def song_at(self, row):
         if 0 <= row < len(self._rows):
             return self._rows[row].song
