@@ -20,7 +20,7 @@ menu) multiplies everything on top.
 
 import re
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QMenu, QWidget
 
@@ -41,7 +41,7 @@ SB_THUMB = (52, 53, 8, 18)               # scrollbar thumb sprite
 # Miniplayer in the bottom-right corner (all coords relative to that corner's
 # origin at x = width-150, y = height-FRAME_B). Verified against the base/Bento/
 # Winamp3/Winamp5 skins: a title strip on top, a transport row + time below.
-MP_TITLE = (5, 8, 92)                    # current-song title strip (x, y, max width)
+MP_TITLE = (7, 10, 89)                   # current-song title strip (x, y, max width)
 MP_COLON_X = 83                          # corner x of the skin's baked time ':' (gap)
 MP_CLOCK_Y = 23                          # clock digit baseline y (in the corner)
 MP_BTN_Y, MP_BTN_H = 24, 13              # transport button row (y band)
@@ -94,6 +94,12 @@ class SkinnedPlaylistWindow(QWidget):
         self._deferred_select = None  # single-select this row on release if no drag
         self._reorder = False     # a drag-to-reorder is in progress
         self._drop_index = None   # insertion index shown while reordering
+        self._mp_scroll = 0       # miniplayer title marquee offset
+
+        # Marquee tick for the miniplayer title (only repaints while it scrolls).
+        self._mp_timer = QTimer(self)
+        self._mp_timer.timeout.connect(self._mp_tick)
+        self._mp_timer.start(220)
 
         # A new song re-enables follow so the view snaps to what's now playing;
         # between songs the user can scroll the list freely.
@@ -196,6 +202,7 @@ class SkinnedPlaylistWindow(QWidget):
 
     def _on_song_changed(self, *ignore):
         self._follow = True
+        self._mp_scroll = 0     # restart the mini title marquee for the new song
         self.update()
 
     def _on_model_reset(self, *ignore):
@@ -524,6 +531,30 @@ class SkinnedPlaylistWindow(QWidget):
             thumb = sb[0]
             p.drawImage(thumb.x(), thumb.y(), sk.sprite('pledit.bmp', *SB_THUMB))
 
+    def _mp_title_text(self, songs=None, cur=None):
+        """The miniplayer's title text (current song), or '' when nothing plays."""
+        if cur is None:
+            cur = self.ctl.current_song_index
+        if songs is None:
+            songs = self._rows()
+        if cur is not None and 0 <= cur < len(songs) and songs[cur] is not None:
+            song = songs[cur]
+            return '{}. {} - {}'.format(cur + 1, song.artist, song.title)
+        return ''
+
+    def _mp_tick(self):
+        """Advance the mini title marquee, repainting only while it overflows."""
+        if not self.isVisible() or self._collapsed or not self._frame_on():
+            if self._mp_scroll:
+                self._mp_scroll = 0
+            return
+        if len(self._mp_title_text()) * CHAR_W > MP_TITLE[2]:
+            self._mp_scroll += 1
+            self.update()
+        elif self._mp_scroll:
+            self._mp_scroll = 0
+            self.update()
+
     def _paint_miniplayer(self, p, w, lh, songs, cur):
         """The bottom-right mini display, drawn in the skin's bitmap TEXT font
         (matching the main window): the current song's title in the strip, and
@@ -531,14 +562,20 @@ class SkinnedPlaylistWindow(QWidget):
         (so we draw no ':' of our own). The transport glyphs are baked into the
         corner sprite; _mini_transport_at makes them clickable."""
         cx, cy = w - 150, lh - FRAME_B
-        # Title (clipped to the strip; the TEXT font uppercases, as Winamp does).
-        if cur is not None and 0 <= cur < len(songs) and songs[cur] is not None:
-            song = songs[cur]
+        # Title marquee in the TEXT font (scrolls when it overflows the strip).
+        text = self._mp_title_text(songs, cur)
+        if text:
             tx, ty, tw = MP_TITLE
             p.save()
             p.setClipRect(cx + tx, cy + ty, tw, CHAR_H)
-            p.drawImage(cx + tx, cy + ty,
-                        self._text_font.render('{}. {} - {}'.format(cur + 1, song.artist, song.title)))
+            if len(text) * CHAR_W > tw:                       # overflows -> marquee
+                img = self._text_font.render(text + '   ***   ')
+                span = img.width()
+                off = self._mp_scroll % span
+                p.drawImage(cx + tx - off, cy + ty, img)
+                p.drawImage(cx + tx - off + span, cy + ty, img)   # wrap-around copy
+            else:
+                p.drawImage(cx + tx, cy + ty, self._text_font.render(text))
             p.restore()
         # Total time: minutes right of the transport, seconds after the baked ':'.
         total = sum(int(s.get_duration_sec() or 0) for s in songs if s is not None)
