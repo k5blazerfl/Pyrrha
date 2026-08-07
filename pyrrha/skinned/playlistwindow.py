@@ -470,6 +470,17 @@ class SkinnedPlaylistWindow(QWidget):
         self._follow = True     # re-enable follow: the next paint centres on it
         self.update()
 
+    def _reveal(self, song):
+        """Open the containing folder of a local track in the file manager."""
+        import os
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        path = getattr(song, 'path', '')
+        if not path:
+            return
+        folder = os.path.dirname(os.path.abspath(path))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
     # -------------------------------------------------------------- paint
     def paintEvent(self, event):
         w = self._lw()
@@ -806,6 +817,8 @@ class SkinnedPlaylistWindow(QWidget):
             menu.addAction(_('Play'), self._play_focus)
             rem = menu.addAction(_('Remove Selected'), self._remove_selection)
             rem.setEnabled(bool(self._selection))
+            rev = menu.addAction(_('Reveal in File Manager'), lambda: self._reveal(song))
+            rev.setEnabled(bool(getattr(song, 'path', '')))
         else:
             icon = c.song_icon(song)
             if icon == 'love':
@@ -820,6 +833,8 @@ class SkinnedPlaylistWindow(QWidget):
             menu.addSeparator()
             menu.addAction(_('Create Station from Artist'), lambda: c.create_artist_station(song))
             menu.addAction(_('Create Station from Song'), lambda: c.create_song_station(song))
+            menu.addSeparator()
+            menu.addAction(_('Song Information'), lambda: c.info_song(song=song))
         # Preemptive skip: playback jumps over marked songs when advancing.
         menu.addSeparator()
         if getattr(song, 'skip', False):

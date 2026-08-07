@@ -34,6 +34,10 @@ def main():
                         help='Use a classic Winamp (.wsz) skinned UI (prototype)')
     parser.add_argument('--scale', type=float, default=1.0,
                         help='Initial skinned-UI scale factor (e.g. 1, 1.5, 2)')
+    parser.add_argument('--new-instance', action='store_true',
+                        help='Start a new instance even if one is already running')
+    parser.add_argument('files', nargs='*',
+                        help='Audio files/folders to play or enqueue')
     args = parser.parse_args()
 
     if args.version:
@@ -66,6 +70,16 @@ def main():
     # Keep the compositor-visible themed icon in step with the bundled one
     # (Wayland ignores setWindowIcon for the taskbar). No-op when unchanged.
     sync_user_icon()
+
+    # Single-instance: if a Pyrrha is already running (same install), hand it our
+    # file arguments to enqueue and bring it forward, then exit. --new-instance
+    # bypasses this. The socket name is per-install, so a working-tree run and an
+    # installed run don't forward to each other.
+    from .single_instance import server_name, send_to_running, SingleInstanceServer
+    si_name = server_name(APP_ID)
+    cli_files = [os.path.abspath(f) for f in args.files if f]
+    if not args.new_instance and send_to_running(si_name, cli_files):
+        return 0
 
     # Flush the QSettings-backed config to disk on exit (writes are otherwise
     # only synced periodically by Qt).
@@ -111,6 +125,31 @@ def main():
             window.show()
     else:
         window.show()
+
+    # Own the single-instance socket and forward future launches to this window.
+    si_server = None
+    if not args.new_instance:
+        si_server = SingleInstanceServer(si_name)
+
+        def _on_second_launch(paths):
+            if paths:
+                window.add_local_files(paths)
+            target = window
+            shell = getattr(window, 'skinned_shell', None)
+            if shell is not None and getattr(window, '_skinned_active', False):
+                target = shell
+            if target.isMinimized():
+                target.showNormal()
+            else:
+                target.show()
+            target.raise_()
+            target.activateWindow()
+
+        si_server.received.connect(_on_second_launch)
+
+    # Load any files given on our own command line (switches to local playback).
+    if cli_files:
+        window.add_local_files(cli_files)
 
     return app.exec()
 

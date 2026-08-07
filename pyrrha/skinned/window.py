@@ -1124,6 +1124,26 @@ class SkinnedWindow(QWidget):
                                 lambda: (c.toggle_repeat(), self.update()))
         repeat.setCheckable(True)
         repeat.setChecked(bool(getattr(c, 'repeat', False)))
+        # Sleep timer (Winamp): stop after N minutes or at the end of the track.
+        if hasattr(c, 'sleep_status'):
+            mode, remaining, mins_set = c.sleep_status()
+            sleep_menu = menu.addMenu(_('Sleep'))
+            if mode == 'timer' and remaining is not None:
+                sleep_menu.setTitle(_('Sleep — {}:{:02d} left').format(
+                    remaining // 60, remaining % 60))
+            elif mode == 'track':
+                sleep_menu.setTitle(_('Sleep — end of track'))
+            off = sleep_menu.addAction(_('Off'), lambda: c.set_sleep(0))
+            off.setCheckable(True)
+            off.setChecked(mode == 'off')
+            for mins in (15, 30, 45, 60, 90):
+                a = sleep_menu.addAction(_('{} minutes').format(mins),
+                                         lambda *args, m=mins: c.set_sleep(m))
+                a.setCheckable(True)
+                a.setChecked(mode == 'timer' and mins_set == mins)
+            eot = sleep_menu.addAction(_('End of Track'), c.set_sleep_end_of_track)
+            eot.setCheckable(True)
+            eot.setChecked(mode == 'track')
         time_menu = menu.addMenu(_('Time'))
         el = time_menu.addAction(_('Elapsed'), lambda: self._set_time_remaining(False))
         el.setCheckable(True)
