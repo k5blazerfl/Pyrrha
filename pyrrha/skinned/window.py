@@ -1002,6 +1002,15 @@ class SkinnedWindow(QWidget):
         h = TITLEBAR[3] if self._collapsed else H   # windowshade → title bar only
         return int(h * self._scale())
 
+    def shape_region(self):
+        """Non-rectangular mask for shaped skins (region.txt), in local coords at
+        the current scale; None when the skin is rectangular or the window is
+        widened (region.txt only describes the native-width window)."""
+        if self._lw() > W:
+            return None
+        sec = 'windowshade' if self._collapsed else 'normal'
+        return self.skin.region(sec, self._scale())
+
     def _toggle_shade(self):
         shell = self.window()
         if hasattr(shell, 'toggle_shade'):
@@ -1289,7 +1298,10 @@ class SkinnedShell(QWidget):
             y = max(0, min(oh - p.height(), y))
             p.move(x, y)
             p.setVisible(True)
-            region += QRegion(x, y, p.width(), p.height())
+            # Shaped skins (region.txt) mask out corners; fall back to the full
+            # rect for rectangular panels (and the playlist, always rectangular).
+            shp = p.shape_region() if hasattr(p, 'shape_region') else None
+            region += shp.translated(x, y) if shp is not None else QRegion(x, y, p.width(), p.height())
         # setMask clips both input *and* our own painting, so we can only clear
         # pixels inside the mask — a panel that moved leaves its old pixels behind
         # (outside the new mask) as a trail. So temporarily widen the mask to the
