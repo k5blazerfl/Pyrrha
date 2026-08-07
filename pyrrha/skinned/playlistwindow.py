@@ -70,8 +70,13 @@ class SkinnedPlaylistWindow(QWidget):
         self._closed = False
         self._resizing = False
         self._height = H          # logical height (resizable); width is never dragged
+        self._scroll = 0          # top visible row when browsing manually
+        self._follow = True       # auto-scroll to keep the current song visible
+        self._sb_drag = None      # scrollbar thumb drag: cursor-to-thumb-top offset
 
-        controller.song_changed.connect(lambda *_: self.update())
+        # A new song re-enables follow so the view snaps to what's now playing;
+        # between songs the user can scroll the list freely.
+        controller.song_changed.connect(self._on_song_changed)
         # Repaint on any model change — additions (songs_added covers the
         # asynchronous Pandora fill) and, crucially, clears/resets (e.g.
         # switching to Local Playback empties the list).
@@ -167,15 +172,57 @@ class SkinnedPlaylistWindow(QWidget):
                 and getattr(self.window(), 'mode', 'modern') == 'classic'
                 and self._has_frame())
 
-    def _visible_range(self, count):
+    def _on_song_changed(self, *ignore):
+        self._follow = True
+        self.update()
+
+    def _capacity(self):
+        """How many rows fit in the list area at the current height."""
         bottom = FRAME_B if self._frame_on() else 6
-        capacity = max(1, (self._lh() - bottom - LIST_TOP) // ROW_H)
-        cur = self.ctl.current_song_index or 0
-        start = 0
-        if count > capacity and cur >= capacity - 1:
-            start = min(cur - capacity // 2, count - capacity)
-            start = max(0, start)
-        return start, min(count, start + capacity)
+        return max(1, (self._lh() - bottom - LIST_TOP) // ROW_H)
+
+    def _max_start(self, count=None):
+        if count is None:
+            count = len(self._rows())
+        return max(0, count - self._capacity())
+
+    def _visible_range(self, count):
+        """The [start, end) rows to draw. While following, keep the current song
+        visible; otherwise honour the manual scroll offset. Either way ``_scroll``
+        is left holding the current top row so scroll actions can build on it."""
+        cap = self._capacity()
+        maxstart = max(0, count - cap)
+        if self._follow:
+            cur = self.ctl.current_song_index or 0
+            start = 0
+            if count > cap and cur >= cap - 1:
+                start = max(0, min(cur - cap // 2, maxstart))
+        else:
+            start = min(self._scroll, maxstart)
+        self._scroll = max(0, start)
+        return self._scroll, min(count, self._scroll + cap)
+
+    def _scroll_to(self, start):
+        self._follow = False
+        self._scroll = max(0, min(self._max_start(), int(start)))
+        self.update()
+
+    def _scroll_by(self, delta_rows):
+        self._scroll_to(self._scroll + delta_rows)
+
+    def _sb_geom(self):
+        """Scrollbar as (thumb_rect, track_top, track_h) in logical px for the
+        current scroll position, or None when no scrollbar is shown."""
+        if not self._frame_on() or self._collapsed:
+            return None
+        lh, w = self._lh(), self._lw()
+        maxstart = self._max_start()
+        track_top = TITLE_H + 1
+        thumb_w, thumb_h = SB_THUMB[2], SB_THUMB[3]
+        track_h = max(0, lh - FRAME_B - track_top - thumb_h)
+        frac = (self._scroll / maxstart) if maxstart else 0.0
+        thumb_y = track_top + int(frac * track_h)
+        return QRect(w - FRAME_R + 2, thumb_y, thumb_w, thumb_h), track_top, track_h
 
     # -------------------------------------------------------------- paint
     def paintEvent(self, event):
@@ -264,15 +311,12 @@ class SkinnedPlaylistWindow(QWidget):
             x += 25
         p.drawImage(0, by, sk.sprite('pledit.bmp', 0, 72, 125, FRAME_B))
         p.drawImage(w - 150, by, sk.sprite('pledit.bmp', 126, 72, 150, FRAME_B))
-        # Scrollbar thumb on the right border.
-        count = len(self._rows())
-        start, end = self._visible_range(count)
-        cap = max(1, end - start)
-        track_top = TITLE_H + 1
-        track_h = max(0, lh - FRAME_B - track_top - SB_THUMB[3])
-        frac = start / (count - cap) if count > cap else 0.0
-        ty = track_top + int(frac * track_h)
-        p.drawImage(w - FRAME_R + 2, ty, sk.sprite('pledit.bmp', *SB_THUMB))
+        # Scrollbar thumb on the right border (position from the current scroll).
+        self._visible_range(len(self._rows()))   # sync _scroll for _sb_geom
+        sb = self._sb_geom()
+        if sb is not None:
+            thumb = sb[0]
+            p.drawImage(thumb.x(), thumb.y(), sk.sprite('pledit.bmp', *SB_THUMB))
 
     # -------------------------------------------------------------- mouse
     def _song_index_at(self, y):
@@ -309,6 +353,18 @@ class SkinnedPlaylistWindow(QWidget):
         if self._min_rect().contains(pos):
             self._toggle_collapse()
             return
+        # Scrollbar: grab the thumb, or page up/down by clicking the track.
+        sb = self._sb_geom()
+        if sb is not None:
+            thumb, track_top, track_h = sb
+            if pos.x() >= self._lw() - FRAME_R and track_top <= pos.y() < track_top + track_h + thumb.height():
+                if thumb.contains(pos):
+                    self._sb_drag = pos.y() - thumb.y()
+                elif pos.y() < thumb.y():
+                    self._scroll_by(-self._capacity())
+                else:
+                    self._scroll_by(self._capacity())
+                return
         if pos.y() < TITLE_H:
             shell = self.window()
             # Classic: tear the playlist off the stack (magnetically re-snaps).
@@ -354,6 +410,14 @@ class SkinnedPlaylistWindow(QWidget):
         if getattr(self, '_titledrag', False):
             self.window().free_drag_move(self, event.globalPosition().toPoint())
             return
+        if self._sb_drag is not None:
+            sb = self._sb_geom()
+            if sb is not None:
+                _thumb, track_top, track_h = sb
+                py = (event.position() / self._scale()).toPoint().y()
+                frac = ((py - self._sb_drag - track_top) / track_h) if track_h else 0.0
+                self._scroll_to(round(frac * self._max_start()))
+            return
         if self._resizing:
             # Drag the corner: vertical only. Classic mode stays native width;
             # modern width is driven by the double-click album-art widen.
@@ -373,7 +437,15 @@ class SkinnedPlaylistWindow(QWidget):
             self._titledrag = False
             self.window().end_free_drag()
             return
+        self._sb_drag = None
         self._resizing = False
 
     def wheelEvent(self, event):
-        self.window().wheelEvent(event)   # scroll -> volume
+        # Over a scrollable list the wheel scrolls it; otherwise fall through to
+        # the shell's volume wheel (classic Winamp behavior).
+        if not self._collapsed and len(self._rows()) > self._capacity():
+            notches = event.angleDelta().y() / 120.0
+            self._scroll_by(int(round(-notches * 3)))   # 3 rows per notch
+            event.accept()
+        else:
+            self.window().wheelEvent(event)
