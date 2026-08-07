@@ -23,6 +23,7 @@ import math
 import os
 import random
 import re
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -126,6 +127,26 @@ class PseudoGst(Enum):
             3: Gst.State.PAUSED,
             4: Gst.State.NULL,
         }[self.value]
+
+
+def _dropped_skin_paths(mime):
+    """Local skin paths (.wsz/.zip or folders with a main.bmp) from drag mime."""
+    out = []
+    if not mime.hasUrls():
+        return out
+    for url in mime.urls():
+        if not url.isLocalFile():
+            continue
+        p = url.toLocalFile()
+        if p.lower().endswith(('.wsz', '.zip')):
+            out.append(p)
+        elif os.path.isdir(p):
+            try:
+                if any(f.lower() == 'main.bmp' for f in os.listdir(p)):
+                    out.append(p)
+            except OSError:
+                pass
+    return out
 
 
 class PyrrhaWindow(QMainWindow):
@@ -325,6 +346,9 @@ class PyrrhaWindow(QMainWindow):
             self.menu_button.setIcon(menu_icon)
         self.menu_button.setPopupMode(QToolButton.InstantPopup)
         self.menu_button.setMenu(self._build_main_menu())
+        # Drop a .wsz / skin folder onto the window to install it and open it in
+        # the skinned (WinAMP 2.x) view.
+        self.setAcceptDrops(True)
 
         header = QHBoxLayout()
         header.addWidget(self.stations_button)
@@ -437,6 +461,22 @@ class PyrrhaWindow(QMainWindow):
         self.set_skin_mode(mode)
         if self.show_skinned_view(force_modern=False) and self.skinned_shell is not None:
             self.skinned_shell.set_mode(mode)
+
+    def dragEnterEvent(self, event):
+        if _dropped_skin_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = _dropped_skin_paths(event.mimeData())
+        if not paths:
+            return
+        installed = self.install_skin(paths[0])
+        self.set_last_skin(installed)
+        # Show it in the WinAMP 2.x view, then apply (in case the shell existed).
+        self.show_skinned_view_mode('classic')
+        if self.skinned_shell is not None:
+            self.skinned_shell.load_skin(installed)
+        event.acceptProposedAction()
 
     def _build_skinned_shell(self, force_modern=True):
         """Create the Winamp-skinned shell on demand from the last-used skin, or
@@ -1523,6 +1563,29 @@ class PyrrhaWindow(QMainWindow):
                     out.append((label, full))
                     seen.add(label.lower())
         return out
+
+    def install_skin(self, path):
+        """Copy a .wsz/.zip skin (or a skin folder) into the user's skins dir so
+        it persists in the library. Returns the installed path, or the original
+        path if it's already in the library or the copy fails."""
+        dest_dir = self.skins_dir()
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError:
+            return path
+        dest = os.path.join(dest_dir, os.path.basename(os.path.normpath(path)))
+        try:
+            if os.path.abspath(path) == os.path.abspath(dest) or os.path.exists(dest):
+                return dest   # already installed (or a same-named skin exists)
+            if os.path.isdir(path):
+                shutil.copytree(path, dest)
+            else:
+                shutil.copy2(path, dest)
+            logging.info('Installed skin to %s', dest)
+            return dest
+        except (OSError, shutil.Error) as e:
+            logging.warning('Failed to install skin %s: %s', path, e)
+            return path
 
     def _skin_mode_file(self):
         d = os.path.join(GLib.get_user_config_dir(), 'pyrrha')

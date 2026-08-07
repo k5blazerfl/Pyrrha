@@ -27,6 +27,7 @@ class SkinBrowser(QDialog):
         self._thumbs = {}   # path -> QPixmap (or None)
         self.setWindowTitle(_('Skins'))
         self.resize(440, 400)
+        self.setAcceptDrops(True)   # drop a .wsz / skin folder to install it
 
         layout = QVBoxLayout(self)
         self.list = QListWidget()
@@ -96,17 +97,32 @@ class SkinBrowser(QDialog):
     def _apply_item(self, item):
         self._apply(item.data(Qt.UserRole))
 
+    def _install_apply(self, path):
+        """Persist an external skin into the library, apply it, and refresh."""
+        if hasattr(self.ctl, 'install_skin'):
+            path = self.ctl.install_skin(path)
+        self._apply(path)
+        self.reload()
+
     def _load_file(self):
         path, _sel = QFileDialog.getOpenFileName(
             self, _('Load Winamp Skin'), self.ctl.skins_dir(),
             _('Winamp skins (*.wsz *.zip);;All files (*)'))
         if path:
-            self._apply(path)
-            self.reload()
+            self._install_apply(path)
 
     def _load_folder(self):
         path = QFileDialog.getExistingDirectory(
             self, _('Load Skin Folder'), self.ctl.skins_dir())
         if path:
-            self._apply(path)
-            self.reload()
+            self._install_apply(path)
+
+    def dragEnterEvent(self, event):
+        if self.shell._skin_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = self.shell._skin_paths(event.mimeData())
+        if paths:
+            self._install_apply(paths[0])
+            event.acceptProposedAction()
