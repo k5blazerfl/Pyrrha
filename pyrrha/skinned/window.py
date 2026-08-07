@@ -979,6 +979,9 @@ class SkinnedWindow(QWidget):
         if event.button() != Qt.LeftButton:
             return
         pos = (event.position() / self._scale()).toPoint()
+        if VIS.contains(pos):                  # double-click the vis → big window
+            self.window().open_vis_window()
+            return
         if pos.y() >= TITLEBAR[3]:
             return
         dx = self._dx()
@@ -1158,6 +1161,9 @@ class SkinnedWindow(QWidget):
             a = vis_menu.addAction(vlabel, lambda *args, m=vmode: self._set_vis_mode(m))
             a.setCheckable(True)
             a.setChecked(self._vis_mode == vmode)
+        vis_menu.addSeparator()
+        vis_menu.addAction(_('Open Visualizer Window…'),
+                           lambda: self.window().open_vis_window())
         top = menu.addAction(_('Always on Top') + '\tCtrl+A',
                              lambda: self._clutter_action('A', None))
         top.setCheckable(True)
@@ -1264,6 +1270,7 @@ class SkinnedShell(QWidget):
         self._activated_at = 0.0  # when the window last became active (click-to-focus)
         self._jump_dlg = None     # lazily-built Jump-to-File dialog (classic 'J')
         self._jump_time_dlg = None  # lazily-built Jump-to-Time dialog (Ctrl+J)
+        self._vis_window = None    # lazily-built large visualizer window
         # Classic tear-off layout: each panel's *absolute* logical position inside
         # the screen-sized overlay ({'main'|'eq'|'pl': [x, y]}). Absolute (not
         # relative to main) so a torn-off panel stays put when the main window is
@@ -1328,6 +1335,8 @@ class SkinnedShell(QWidget):
         for panel in (self.main, self.eq, self.pl):
             if panel is not None:
                 panel.set_skin(skin)
+        if self._vis_window is not None:
+            self._vis_window.set_skin(skin)
 
     def _max_content_w(self):
         # Classic mode never widens main/EQ (they stay native, 275px).
@@ -2065,6 +2074,16 @@ class SkinnedShell(QWidget):
         if self._jump_time_dlg is None:
             self._jump_time_dlg = JumpToTimeDialog(self.ctl, self)
         self._jump_time_dlg.popup()
+
+    def open_vis_window(self):
+        """Open (or re-focus) the large visualizer window, sharing the skin
+        palette and the controller's live spectrum."""
+        from .viswindow import VisWindow
+        if self._vis_window is None:
+            self._vis_window = VisWindow(self.ctl, self.skin, self)
+        self._vis_window.show()
+        self._vis_window.raise_()
+        self._vis_window.activateWindow()
 
     def toggle_width(self):
         """Widen the player to reveal the album art beside the EQ (a square),
