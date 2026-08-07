@@ -36,7 +36,7 @@ gi.require_version('GstAudio', '1.0')
 gi.require_version('GstPbutils', '1.0')
 from gi.repository import Gst, GstAudio, GstPbutils, GLib
 
-from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QListView, QMainWindow, QMenu,
@@ -266,6 +266,12 @@ class PyrrhaWindow(QMainWindow):
         # Play order for local playback (persisted; ignored for Pandora).
         self.shuffle = self.settings['shuffle']
         self.repeat = self.settings['repeat']
+        # Sleep timer (Winamp "Sleep"): stop playback after a delay or at the
+        # end of the current track.
+        self._sleep_timer = None
+        self._sleep_deadline = None      # monotonic time the timer fires, or None
+        self._sleep_minutes = 0          # active preset (0 = off), for the menu
+        self._sleep_end_of_track = False
         self._shuffle_order = None   # cached permutation of playlist indices
 
         self.auto_retrying_auth = False
@@ -1136,6 +1142,46 @@ class PyrrhaWindow(QMainWindow):
     def toggle_repeat(self, *ignore):
         self.set_repeat(not self.repeat)
 
+    # ------------------------------------------------------- sleep timer
+    def set_sleep(self, minutes):
+        """Stop playback after ``minutes`` (0 = off). Replaces any end-of-track
+        sleep. The classic Winamp Sleep function."""
+        self._sleep_end_of_track = False
+        self._sleep_minutes = int(minutes) if minutes else 0
+        if self._sleep_timer is None:
+            self._sleep_timer = QTimer(self)
+            self._sleep_timer.setSingleShot(True)
+            self._sleep_timer.timeout.connect(self._on_sleep_elapsed)
+        self._sleep_timer.stop()
+        if self._sleep_minutes > 0:
+            self._sleep_deadline = time.monotonic() + self._sleep_minutes * 60
+            self._sleep_timer.start(self._sleep_minutes * 60 * 1000)
+        else:
+            self._sleep_deadline = None
+
+    def set_sleep_end_of_track(self, *ignore):
+        """Stop playback when the current track finishes."""
+        if self._sleep_timer is not None:
+            self._sleep_timer.stop()
+        self._sleep_deadline = None
+        self._sleep_minutes = 0
+        self._sleep_end_of_track = True
+
+    def _on_sleep_elapsed(self):
+        self._sleep_deadline = None
+        self._sleep_minutes = 0
+        self.stop()
+
+    def sleep_status(self):
+        """(mode, remaining_secs, minutes) for the UI. mode is
+        'off' | 'timer' | 'track'."""
+        if self._sleep_end_of_track:
+            return ('track', None, 0)
+        if self._sleep_deadline is not None:
+            return ('timer', max(0, int(self._sleep_deadline - time.monotonic())),
+                    self._sleep_minutes)
+        return ('off', None, 0)
+
     # ----------------------------------------------------- local playback
     def open_local_files(self, *ignore):
         exts = ' '.join('*' + e for e in local.AUDIO_EXTENSIONS)
@@ -1191,7 +1237,20 @@ class PyrrhaWindow(QMainWindow):
             QMessageBox.warning(self, _('Save Playlist'),
                                 _('Could not save:\n{}').format(e))
 
-    def _load_local(self, paths, label):
+    def add_local_files(self, paths):
+        """Load dropped audio files/folders: enqueue onto the current local
+        playlist when already in local playback, otherwise switch to local and
+        play them (classic Winamp drop-to-add)."""
+        if not paths:
+            return
+        first = paths[0]
+        if os.path.isdir(first):
+            label = os.path.basename(first.rstrip('/')) or _('Local Files')
+        else:
+            label = os.path.basename(os.path.dirname(first)) or _('Local Files')
+        self._load_local(paths, label, append=self.local_mode)
+
+    def _load_local(self, paths, label, append=False):
         files = local.collect_audio_files(paths)
         if not files:
             QMessageBox.information(self, _('Open'),
@@ -1201,6 +1260,19 @@ class PyrrhaWindow(QMainWindow):
         songs = local.build_songs(files)
         self.status_pop('net')
         if not songs:
+            return
+
+        if append and self.local_mode:
+            # Enqueue onto the existing local playlist without disrupting play.
+            was_empty = len(self.songs_model) == 0
+            first_new = len(self.songs_model)
+            for s in songs:
+                s.index = len(self.songs_model)
+                self.songs_model.append_song(s)
+                self.update_song_row(s)
+                self._set_local_art(s)
+            if was_empty or self.current_song_index is None:
+                self.start_song(first_new)
             return
 
         self.stop()
@@ -1529,6 +1601,10 @@ class PyrrhaWindow(QMainWindow):
 
     def on_gst_eos(self, bus, message):
         logging.info("EOS")
+        if self._sleep_end_of_track:
+            self._sleep_end_of_track = False
+            self.stop()
+            return
         self.next_song()
 
     def on_gst_plugin_installed(self, result, userdata):

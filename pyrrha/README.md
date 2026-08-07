@@ -1,13 +1,17 @@
-# Pyrrha — a Qt port of Pithos
+# Pyrrha — architecture
 
-Pyrrha is a Qt (PySide6) port of [Pithos](https://pithos.github.io), the native
-Pandora Radio client. This is the **core-player** phase of the port: login,
-stations, playback and transport, ratings, album art and preferences all work.
-See *Status* below for what is deferred.
+Pyrrha is a skinnable Qt (PySide6) audio player that plays both Pandora radio and
+local files. It **began** as a GTK→Qt port of
+[Pithos](https://pithos.github.io), the native Pandora client, and still builds
+on Pithos' core (Pandora API, GStreamer pipeline, settings, credentials). Layered
+on top — with no analog in Pithos — are local-file playback and a Winamp 2.x
+`.wsz` skin engine (classic and modern skinned shells alongside the modern Qt
+window). This document covers the shared core; see the top-level
+[`README.md`](../README.md) for the feature overview.
 
-## Design
+## Design (the Pithos-derived core)
 
-The port deliberately keeps the parts of Pithos that have nothing to do with the
+Pyrrha deliberately keeps the parts of Pithos that have nothing to do with the
 GTK widget toolkit and swaps **only the view layer** for Qt:
 
 | Concern | Approach |
@@ -91,7 +95,7 @@ bookmarks, create-station-from-song/artist, album art with caching, song context
 menu, preferences (account/quality/proxy), stations management dialog, search,
 and the about box.
 
-**Plugins (in progress):**
+**Plugins** — all 10 of Pithos' plugins are ported (details below):
 
 - **MPRIS** (`plugins/mpris.py`) — full `org.mpris.MediaPlayer2` + `.Player`
   (plus Playlists / TrackList and Pithos' ratings extension), reusing Pithos'

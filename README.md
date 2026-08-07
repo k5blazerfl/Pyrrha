@@ -2,16 +2,29 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-A Qt (PySide6) Pandora Radio client — a port of [Pithos](https://pithos.github.io) from GTK to Qt.
+A skinnable Qt (PySide6) desktop audio player with classic Winamp 2.x fidelity —
+playing both Pandora radio and your local music library.
 
-Pyrrha keeps Pithos' battle-tested internals (the Pandora API client, the
-GStreamer playback pipeline with ReplayGain/limiter/equalizer, GSettings and
-libsecret) and replaces the GTK UI with Qt. The GLib-based subsystems are driven
-from the Qt event loop by pumping the GLib main context from a `QTimer`.
+Pyrrha began as a GTK→Qt port of [Pithos](https://pithos.github.io) and still
+rides on its battle-tested internals: the Pandora API client, the GStreamer
+playback pipeline (ReplayGain/limiter/equalizer), GSettings and libsecret. Those
+GLib-based subsystems are driven from the Qt event loop by pumping the GLib main
+context from a `QTimer`. Everything above that core — the local-file support and
+the Winamp-faithful skin engine — is new to Pyrrha and has no analog in Pithos.
+
+Three interchangeable UIs share one player:
+
+- **Pandora** — a modern Qt window (the Pithos-descended interface).
+- **Pyrrha** — a modern skinned shell.
+- **WinAMP 2.x** — a pixel-faithful classic mode with a full `.wsz` skin engine:
+  shaped skins (`region.txt`), bitmap fonts, per-region cursors, a 10-band EQ
+  window, a playlist editor, windowshade, and a multi-monitor tear-off overlay.
 
 ## Status
 
-- Full core player: login, stations, gapless playback, ratings, album art, preferences.
+- Two sources, one player: Pandora streaming **and** local-file playback
+  (drag-and-drop, folder scan, GStreamer tag/art discovery, a managed queue).
+- Full Pandora player: login, stations, gapless playback, ratings, album art, preferences.
 - All **10** of Pithos' plugins ported: MPRIS (with media keys, hide-on-close and
   live playlists), media keys, notifications, system-tray icon, 10-band equalizer,
   Last.fm scrobbling, screensaver inhibit, screensaver pause, ReplayGain volume
