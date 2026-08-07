@@ -156,6 +156,7 @@ class SkinnedWindow(QWidget):
         self._pressed = None      # currently-held transport button
         self._ws_pressed = None   # windowshade mini-transport button held
         self._ws_colon = None     # detected windowshade ':' (x, draw_own), cached
+        self._cursor_name = False  # region cursor currently set (False = unknown)
         self._vol_dragging = False
         self._bal_dragging = False
         self._seek_dragging = False   # scrubbing the position bar (local files)
@@ -303,10 +304,44 @@ class SkinnedWindow(QWidget):
     def set_skin(self, skin):
         self.skin = skin
         self._ws_colon = None
+        self._cursor_name = False   # force re-evaluation against the new skin
+        self.unsetCursor()
         self.text_font = TextFont(skin)
         self.num_font = NumberFont(skin)
         self._vis_colors = self._load_vis_colors()   # also refreshes accent/peak
         self.update()
+
+    # -------------------------------------------------------------- cursors
+    def _cursor_for(self, pos):
+        """The skin cursor filename for the region at ``pos`` (classic Winamp
+        gives each region its own pointer), or None for the default arrow."""
+        if self._collapsed:
+            return 'titlebar.cur'          # the windowshade is all title bar
+        dx = self._dx()
+        if MENU.contains(pos):
+            return 'mainmenu.cur'
+        for r in (CLOSE, MINIMIZE, SHADE_BTN):
+            if r.translated(dx, 0).contains(pos):
+                return 'close.cur'
+        if pos.y() < TITLEBAR[3]:           # title bar, not over a window button
+            return 'titlebar.cur'
+        if POSBAR.adjusted(0, 0, dx, 0).contains(pos):   # seek bar stretches
+            return 'posbar.cur'
+        if VOLUME.contains(pos) or BALANCE.contains(pos):
+            return 'volbal.cur'
+        return None
+
+    def _update_cursor(self, pos):
+        """Swap in the region's skin cursor when it changes. No-op for skins that
+        ship no cursors (the common case), which keep the default arrow."""
+        if not self.skin.has_cursors:
+            return
+        name = self._cursor_for(pos)
+        if name == self._cursor_name:
+            return
+        self._cursor_name = name
+        cur = self.skin.cursor(name) if name else None
+        self.setCursor(cur) if cur is not None else self.unsetCursor()
 
     def _load_skin_file(self):
         path, _sel = QFileDialog.getOpenFileName(
@@ -899,6 +934,8 @@ class SkinnedWindow(QWidget):
         elif self._seek_dragging:
             self._seek_frac = self._seek_frac_from_x((event.position() / self._scale()).x())
             self.update()
+        else:
+            self._update_cursor((event.position() / self._scale()).toPoint())
 
     def mouseReleaseEvent(self, event):
         if self._ws_pressed:                   # release windowshade mini-transport

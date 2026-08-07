@@ -12,7 +12,7 @@ import os
 import zipfile
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QImage, QPainter, QPolygon, QRegion
+from PySide6.QtGui import QCursor, QImage, QPainter, QPixmap, QPolygon, QRegion
 
 
 def _ints(s):
@@ -43,8 +43,10 @@ class Skin:
     def __init__(self, path):
         self.path = path
         self._raw = {}       # basename.lower() -> bytes (BMPs)
+        self._raw_cur = {}   # basename.lower() -> bytes (.cur cursors)
         self._text = {}      # basename.lower() -> str (config .txt)
         self._images = {}
+        self._cursors = {}   # basename.lower() -> QCursor | None (decoded lazily)
         self._regions = None       # region.txt polygons, parsed lazily
         self._region_cache = {}    # (section, scale) -> QRegion
 
@@ -65,6 +67,8 @@ class Skin:
         base = name.replace('\\', '/').rsplit('/', 1)[-1].lower()
         if base.endswith('.bmp'):
             self._raw[base] = read()
+        elif base.endswith('.cur'):
+            self._raw_cur[base] = read()
         elif base.endswith('.txt'):
             self._text[base] = read().decode('latin-1', 'replace')
 
@@ -138,6 +142,46 @@ class Skin:
             p.drawImage(sx - x, sy - y, img.copy(sx, sy, ex - sx, ey - sy))
             p.end()
         return out
+
+    # -------------------------------------------------------------- cursors
+    @property
+    def has_cursors(self):
+        """Whether this skin ships any ``.cur`` files (most modern ones don't)."""
+        return bool(self._raw_cur)
+
+    def cursor(self, name):
+        """A QCursor from the skin's ``.cur`` file (e.g. ``'titlebar.cur'``), or
+        None when the skin doesn't ship it. Classic Winamp gives each region its
+        own pointer (title bar, position bar, sliders, …); most modern .wsz skins
+        omit them, so callers fall back to the default arrow on None."""
+        name = name.lower()
+        if name not in self._cursors:
+            self._cursors[name] = self._load_cursor(self._raw_cur.get(name))
+        return self._cursors[name]
+
+    @staticmethod
+    def _load_cursor(data):
+        """Decode a Windows ``.cur`` into a QCursor. A .cur is an .ico whose
+        directory entry stores a hotspot where the .ico stores planes/bitcount,
+        so read the hotspot from the header, flip the type field to 1 and let
+        Qt's ICO reader decode the pixels (it applies the AND mask as alpha)."""
+        if not data or len(data) < 22:
+            return None
+        try:
+            if int.from_bytes(data[2:4], 'little') != 2:   # 2 = cursor
+                return None
+            hx = int.from_bytes(data[10:12], 'little')
+            hy = int.from_bytes(data[12:14], 'little')
+        except Exception:
+            return None
+        ico = bytearray(data)
+        ico[2], ico[3] = 1, 0                              # cursor -> icon
+        img = QImage()
+        if not img.loadFromData(bytes(ico), 'ICO') or img.isNull():
+            return None
+        hx = max(0, min(hx, img.width() - 1))
+        hy = max(0, min(hy, img.height() - 1))
+        return QCursor(QPixmap.fromImage(img), hx, hy)
 
     # ------------------------------------------------------------ region.txt
     def _parse_regions(self):
