@@ -5,50 +5,73 @@
 # under the terms of the GNU General Public License version 3.
 
 """A large, resizable visualizer window — the analyzer/oscilloscope the main
-window shows in miniature, blown up to a full canvas with a spectrogram mode.
+window shows in miniature, blown up to a full canvas.
 
 It reads the controller's ``spectrum_bands`` (fed by the GStreamer ``spectrum``
-element) and colors itself from the loaded skin's ``VISCOLOR.TXT``, so it stays
-of a piece with the classic view. Modes: Bars (with falling peak caps),
-Oscilloscope, and Spectrogram (a scrolling waterfall). Double-click or F toggles
-fullscreen; right-click switches modes.
+element) and, by default, colors itself from the loaded skin's ``VISCOLOR.TXT``.
+Modes: Bars, Dots, Lines, Oscilloscope, Spectrogram (a scrolling waterfall) and
+Starfield (an audio-driven particle field). A peak-hold toggle freezes the
+analyzer caps at their maxima; color presets (Skin/Heat/Mono/Ice) recolor
+everything; sensitivity and falloff are tunable. Double-click or F toggles
+fullscreen; right-click switches everything.
 """
 
 import math
+import random
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter, QPolygon
 from PySide6.QtWidgets import QMenu, QWidget
 
-VIS_BARS, VIS_SCOPE, VIS_WATERFALL = range(3)
-_MODE_NAMES = {VIS_BARS: 'Bars', VIS_SCOPE: 'Oscilloscope', VIS_WATERFALL: 'Spectrogram'}
+VIS_BARS, VIS_DOTS, VIS_LINES, VIS_SCOPE, VIS_WATERFALL, VIS_STARFIELD = range(6)
+_MODE_NAMES = {VIS_BARS: 'Bars', VIS_DOTS: 'Dots', VIS_LINES: 'Lines',
+               VIS_SCOPE: 'Oscilloscope', VIS_WATERFALL: 'Spectrogram',
+               VIS_STARFIELD: 'Starfield'}
+_MODE_KEYS = {Qt.Key_1: VIS_BARS, Qt.Key_2: VIS_DOTS, Qt.Key_3: VIS_LINES,
+              Qt.Key_4: VIS_SCOPE, Qt.Key_5: VIS_WATERFALL, Qt.Key_6: VIS_STARFIELD}
 
-BAR_FALL = 0.05          # per-frame bar falloff (rise is instant)
+PRESET_SKIN, PRESET_HEAT, PRESET_MONO, PRESET_ICE = range(4)
+_PRESET_NAMES = {PRESET_SKIN: 'Skin', PRESET_HEAT: 'Heat',
+                 PRESET_MONO: 'Mono', PRESET_ICE: 'Ice'}
+
 PEAK_GRAVITY = 0.004     # peak-cap fall acceleration (per frame^2)
 WAVE_HARMONICS = 16      # low spectrum bins summed into the scope wave
 FRAME_MS = 33            # ~30 fps render tick
+STAR_COUNT = 240
 
+_SENSITIVITY = [('Low', 0.6), ('Normal', 1.0), ('High', 1.8)]
+_FALLOFF = [('Slow', 0.025), ('Normal', 0.05), ('Fast', 0.11)]
 
 _HEAT_STOPS = [(0, 0, 0), (8, 8, 40), (40, 0, 110), (110, 0, 150), (190, 30, 110),
                (235, 90, 45), (255, 165, 25), (255, 235, 120), (255, 255, 255)]
+_ICE_STOPS = [(4, 10, 40), (0, 70, 150), (30, 170, 220), (150, 235, 245), (255, 255, 255)]
 
 
-def _build_heat(n=64):
-    """A black→blue→magenta→orange→white heat ramp for the spectrogram (skin
-    analyzer palettes are often monochrome, which reads flat as a waterfall)."""
-    out, segs = [], len(_HEAT_STOPS) - 1
+def _ramp_from_stops(stops, n):
+    out, segs = [], len(stops) - 1
     for k in range(n):
         f = k / (n - 1) * segs
         i = min(segs - 1, int(f))
         t = f - i
-        a, b = _HEAT_STOPS[i], _HEAT_STOPS[i + 1]
+        a, b = stops[i], stops[i + 1]
         out.append(QColor(int(a[0] + (b[0] - a[0]) * t),
                           int(a[1] + (b[1] - a[1]) * t),
                           int(a[2] + (b[2] - a[2]) * t)))
     return out
 
 
-_HEAT = _build_heat()
+def _mono(n):
+    return [QColor(v, v, v) for v in (24 + int(231 * i / (n - 1)) for i in range(n))]
+
+
+def _resample(ramp, n):
+    last = len(ramp) - 1
+    return [ramp[min(last, round(i * last / (n - 1)))] for i in range(n)]
+
+
+_HEAT = _ramp_from_stops(_HEAT_STOPS, 64)
+_ICE = _ramp_from_stops(_ICE_STOPS, 64)
+_ICE16 = _resample(_ICE, 16)
 
 
 def parse_viscolors(skin):
@@ -81,15 +104,24 @@ class VisWindow(QWidget):
         self.setMinimumSize(160, 90)
         self.resize(480, 240)
         self._mode = VIS_BARS
+        self._preset = PRESET_SKIN
+        self._peak_hold = False
+        self._gain = 1.0
+        self._falloff = _FALLOFF[1][1]
 
         self._bars = []          # current bar heights (0..1), sized to width
         self._peaks = []
         self._peak_vel = []
-        self._edges = None       # (band_count, nbars) -> log-spaced group edges
+        self._edges = None       # (band_count, groups) -> log-spaced group edges
         self._wave = []          # oscilloscope samples (-1..1), one per px width
         self._wave_ph = [i * 0.7 for i in range(WAVE_HARMONICS)]
         self._wf = None          # spectrogram QImage (scrolls left each frame)
-        self.set_skin(skin)
+        self._stars = [[random.uniform(-1, 1), random.uniform(-1, 1),
+                        random.uniform(0.05, 1.0)] for _ in range(STAR_COUNT)]
+
+        self._skin_pal = parse_viscolors(skin)
+        self.skin = skin
+        self._recompute_palette()
         self._resize_state()
 
         self._timer = QTimer(self)
@@ -99,7 +131,36 @@ class VisWindow(QWidget):
     # ------------------------------------------------------------ palette
     def set_skin(self, skin):
         self.skin = skin
-        self._bg, self._grad, self._osc, self._peak_color = parse_viscolors(skin)
+        self._skin_pal = parse_viscolors(skin)
+        self._recompute_palette()
+
+    def _recompute_palette(self):
+        bg, sk_grad, sk_osc, sk_peak = self._skin_pal
+        p = self._preset
+        if p == PRESET_SKIN:
+            self._bg = bg
+            self._grad = sk_grad
+            self._osc_color = sk_osc[2] if len(sk_osc) > 2 else QColor(180, 220, 130)
+            self._peak_color = sk_peak
+            self._wf_ramp = _HEAT            # skin analyzer palettes read flat as a waterfall
+        elif p == PRESET_HEAT:
+            self._bg = QColor(0, 0, 0)
+            self._grad = _resample(_HEAT, 16)
+            self._osc_color = QColor(255, 170, 40)
+            self._peak_color = QColor(255, 255, 255)
+            self._wf_ramp = _HEAT
+        elif p == PRESET_MONO:
+            self._bg = QColor(0, 0, 0)
+            self._grad = _mono(16)
+            self._osc_color = QColor(210, 210, 210)
+            self._peak_color = QColor(255, 255, 255)
+            self._wf_ramp = _mono(64)
+        else:  # PRESET_ICE
+            self._bg = QColor(2, 6, 20)
+            self._grad = _ICE16
+            self._osc_color = QColor(120, 230, 245)
+            self._peak_color = QColor(255, 255, 255)
+            self._wf_ramp = _ICE
         if self._wf is not None:
             self._wf.fill(self._bg)
         self.update()
@@ -135,29 +196,24 @@ class VisWindow(QWidget):
         self._edges = ((count, groups), edges)
         return edges
 
-    # ------------------------------------------------------------ animation
     def _grouped(self, raw, groups):
-        """Peak magnitude of each of ``groups`` log-spaced band groups."""
         edges = self._group_edges(len(raw), groups)
         return [max(raw[edges[i]:edges[i + 1]] or raw[edges[i]:edges[i] + 1])
                 for i in range(groups)]
 
+    # ------------------------------------------------------------ animation
     def _advance_bars(self, raw):
         n = len(self._bars)
         targets = self._grouped(raw, n) if raw else [0.0] * n
-        moving = False
         for i in range(n):
             t = targets[i]
-            self._bars[i] = t if t >= self._bars[i] else max(t, self._bars[i] - BAR_FALL)
+            self._bars[i] = t if t >= self._bars[i] else max(t, self._bars[i] - self._falloff)
             if self._bars[i] >= self._peaks[i]:
                 self._peaks[i] = self._bars[i]
                 self._peak_vel[i] = 0.0
-            else:
+            elif not self._peak_hold:
                 self._peak_vel[i] += PEAK_GRAVITY
                 self._peaks[i] = max(0.0, self._peaks[i] - self._peak_vel[i])
-            if self._bars[i] > 0.001 or self._peaks[i] > 0.001:
-                moving = True
-        return moving
 
     def _advance_wave(self, raw):
         n = len(self._wave)
@@ -171,33 +227,43 @@ class VisWindow(QWidget):
                 s = sum(a * math.sin(two_pi * (i + 1) * t + self._wave_ph[i])
                         for i, a in enumerate(amps))
                 self._wave[x] = math.tanh(s * 0.8)
-            return True
-        moving = False
-        for x in range(n):
-            self._wave[x] *= 0.82
-            if abs(self._wave[x]) > 0.002:
-                moving = True
-        return moving
+        else:
+            for x in range(n):
+                self._wave[x] *= 0.82
 
     def _advance_waterfall(self, raw):
-        """Scroll the spectrogram left one column and draw a new column at the
-        right edge (bottom = low freq, top = high)."""
         w, h = self._wf.width(), self._wf.height()
         self._wf = self._wf.copy(1, 0, w, h)     # drop the leftmost column
         col = self._grouped(raw, h) if raw else [0.0] * h
-        last = len(_HEAT) - 1
+        ramp = self._wf_ramp
+        last = len(ramp) - 1
         for row in range(h):
             self._wf.setPixelColor(w - 1, h - 1 - row,
-                                   _HEAT[min(last, int(col[row] * (last + 1)))])
-        return bool(raw)
+                                   ramp[min(last, int(col[row] * (last + 1)))])
+
+    def _advance_starfield(self, loudness):
+        speed = 0.008 + loudness * 0.06
+        for s in self._stars:
+            s[2] -= speed
+            if s[2] <= 0.03:
+                s[0] = random.uniform(-1, 1)
+                s[1] = random.uniform(-1, 1)
+                s[2] = 1.0
 
     def _tick(self):
         playing = self.ctl.playing
         raw = getattr(self.ctl, 'spectrum_bands', None) if playing else None
-        if self._mode == VIS_SCOPE:
+        if raw and self._gain != 1.0:
+            raw = [min(1.0, v * self._gain) for v in raw]
+        m = self._mode
+        if m == VIS_SCOPE:
             self._advance_wave(raw)
-        elif self._mode == VIS_WATERFALL:
+        elif m == VIS_WATERFALL:
             self._advance_waterfall(raw)
+        elif m == VIS_STARFIELD:
+            self._advance_bars(raw)
+            loud = sum(self._bars) / len(self._bars) if self._bars else 0.0
+            self._advance_starfield(loud)
         else:
             self._advance_bars(raw)
         self.update()
@@ -212,57 +278,108 @@ class VisWindow(QWidget):
         p.fillRect(0, 0, w, h, self._bg)
         if self._mode == VIS_SCOPE:
             self._paint_scope(p, w, h)
+        elif self._mode == VIS_STARFIELD:
+            self._paint_starfield(p, w, h)
         else:
-            self._paint_bars(p, w, h)
+            self._paint_bars(p, w, h)   # bars / dots / lines
+
+    def _bar_gradient(self, h):
+        grad = QLinearGradient(0, h, 0, 0)
+        stops = len(self._grad)
+        for i, c in enumerate(self._grad):
+            grad.setColorAt(i / (stops - 1), c)
+        return QBrush(grad)
 
     def _paint_bars(self, p, w, h):
         n = len(self._bars)
         pitch = w / n
         bar_w = max(1, int(pitch) - 1)
-        grad = QLinearGradient(0, h, 0, 0)
-        stops = len(self._grad)
-        for i, c in enumerate(self._grad):
-            grad.setColorAt(i / (stops - 1), c)
-        brush = QBrush(grad)
+        last = len(self._grad) - 1
+        brush = self._bar_gradient(h) if self._mode == VIS_BARS else None
+        pts = []
         for i in range(n):
             x = int(i * pitch)
             bh = int(self._bars[i] * h)
-            if bh > 0:
-                p.fillRect(x, h - bh, bar_w, bh, brush)
-            pr = int(self._peaks[i] * (h - 1))
-            if pr > 0:
-                p.fillRect(x, h - pr - 1, bar_w, 2, self._peak_color)
+            if self._mode == VIS_BARS:
+                if bh > 0:
+                    p.fillRect(x, h - bh, bar_w, bh, brush)
+                pr = int(self._peaks[i] * (h - 1))
+                if pr > 0:
+                    p.fillRect(x, h - pr - 1, bar_w, 2, self._peak_color)
+            elif self._mode == VIS_DOTS:
+                color = self._grad[min(last, int(self._bars[i] * (last + 1)))]
+                p.fillRect(x, h - max(2, bh) - 1, bar_w, 3, color)
+            else:  # VIS_LINES — silhouette across the bar tops
+                pts.append(QPoint(x + bar_w // 2, h - bh))
+        if self._mode == VIS_LINES and len(pts) > 1:
+            p.setPen(self._grad[min(last, last)])
+            p.drawPolyline(QPolygon(pts))
 
     def _paint_scope(self, p, w, h):
         mid = h // 2
         amp = (h - 1) / 2.0
-        pen = self._osc[2] if len(self._osc) > 2 else QColor(180, 220, 130)
         pts = [QPoint(x, max(0, min(h - 1, mid - int(self._wave[x] * amp))))
                for x in range(min(w, len(self._wave)))]
         if len(pts) > 1:
-            p.setPen(pen)
+            p.setPen(self._osc_color)
             p.drawPolyline(QPolygon(pts))
+
+    def _paint_starfield(self, p, w, h):
+        cx, cy = w / 2, h / 2
+        scale = min(w, h) * 0.5
+        last = len(self._grad) - 1
+        for x0, y0, z in self._stars:
+            sx = cx + (x0 / z) * scale
+            sy = cy + (y0 / z) * scale
+            if 0 <= sx < w and 0 <= sy < h:
+                size = max(1, int((1 - z) * 4) + 1)
+                p.fillRect(int(sx), int(sy), size, size,
+                           self._grad[min(last, int((1 - z) * (last + 1)))])
 
     # ------------------------------------------------------------ interaction
     def set_mode(self, mode):
         self._mode = mode
         self.update()
 
+    def set_preset(self, preset):
+        self._preset = preset
+        self._recompute_palette()
+
     def toggle_fullscreen(self):
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
+        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+
+    def adjust_gain(self, delta):
+        self._gain = max(0.4, min(3.0, round(self._gain + delta, 2)))
 
     def mouseDoubleClickEvent(self, event):
         self.toggle_fullscreen()
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        for mode in (VIS_BARS, VIS_SCOPE, VIS_WATERFALL):
+        for mode in range(6):
             a = menu.addAction(_(_MODE_NAMES[mode]), lambda *_a, m=mode: self.set_mode(m))
             a.setCheckable(True)
             a.setChecked(self._mode == mode)
+        menu.addSeparator()
+        ph = menu.addAction(_('Peak Hold') + '\tP', lambda: self._toggle_peak_hold())
+        ph.setCheckable(True)
+        ph.setChecked(self._peak_hold)
+        color = menu.addMenu(_('Color'))
+        for preset in range(4):
+            a = color.addAction(_(_PRESET_NAMES[preset]),
+                                lambda *_a, pr=preset: self.set_preset(pr))
+            a.setCheckable(True)
+            a.setChecked(self._preset == preset)
+        sens = menu.addMenu(_('Sensitivity'))
+        for label, g in _SENSITIVITY:
+            a = sens.addAction(_(label), lambda *_a, gg=g: setattr(self, '_gain', gg))
+            a.setCheckable(True)
+            a.setChecked(abs(self._gain - g) < 0.01)
+        fall = menu.addMenu(_('Falloff'))
+        for label, f in _FALLOFF:
+            a = fall.addAction(_(label), lambda *_a, ff=f: setattr(self, '_falloff', ff))
+            a.setCheckable(True)
+            a.setChecked(abs(self._falloff - f) < 0.001)
         menu.addSeparator()
         fs = menu.addAction(_('Fullscreen') + '\tF', self.toggle_fullscreen)
         fs.setCheckable(True)
@@ -270,13 +387,17 @@ class VisWindow(QWidget):
         menu.addAction(_('Close'), self.close)
         menu.exec(event.globalPos())
 
+    def _toggle_peak_hold(self):
+        self._peak_hold = not self._peak_hold
+
+    # ------------------------------------------------------------ lifecycle
     def showEvent(self, event):
-        if not self._timer.isActive():        # resume animation when shown
+        if not self._timer.isActive():
             self._timer.start(FRAME_MS)
         super().showEvent(event)
 
     def hideEvent(self, event):
-        self._timer.stop()                    # don't animate a hidden/closed window
+        self._timer.stop()
         super().hideEvent(event)
 
     def keyPressEvent(self, event):
@@ -284,14 +405,16 @@ class VisWindow(QWidget):
         if key == Qt.Key_F:
             self.toggle_fullscreen()
         elif key == Qt.Key_Escape:
-            if self.isFullScreen():
-                self.showNormal()
-            else:
-                self.close()
+            self.showNormal() if self.isFullScreen() else self.close()
         elif key == Qt.Key_Space:
             self.ctl.user_playpause()
-        elif key in (Qt.Key_1, Qt.Key_2, Qt.Key_3):
-            self.set_mode({Qt.Key_1: VIS_BARS, Qt.Key_2: VIS_SCOPE,
-                           Qt.Key_3: VIS_WATERFALL}[key])
+        elif key == Qt.Key_P:
+            self._toggle_peak_hold()
+        elif key == Qt.Key_Up:
+            self.adjust_gain(0.1)
+        elif key == Qt.Key_Down:
+            self.adjust_gain(-0.1)
+        elif key in _MODE_KEYS:
+            self.set_mode(_MODE_KEYS[key])
         else:
             super().keyPressEvent(event)
