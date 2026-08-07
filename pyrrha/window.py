@@ -1191,7 +1191,20 @@ class PyrrhaWindow(QMainWindow):
             QMessageBox.warning(self, _('Save Playlist'),
                                 _('Could not save:\n{}').format(e))
 
-    def _load_local(self, paths, label):
+    def add_local_files(self, paths):
+        """Load dropped audio files/folders: enqueue onto the current local
+        playlist when already in local playback, otherwise switch to local and
+        play them (classic Winamp drop-to-add)."""
+        if not paths:
+            return
+        first = paths[0]
+        if os.path.isdir(first):
+            label = os.path.basename(first.rstrip('/')) or _('Local Files')
+        else:
+            label = os.path.basename(os.path.dirname(first)) or _('Local Files')
+        self._load_local(paths, label, append=self.local_mode)
+
+    def _load_local(self, paths, label, append=False):
         files = local.collect_audio_files(paths)
         if not files:
             QMessageBox.information(self, _('Open'),
@@ -1201,6 +1214,19 @@ class PyrrhaWindow(QMainWindow):
         songs = local.build_songs(files)
         self.status_pop('net')
         if not songs:
+            return
+
+        if append and self.local_mode:
+            # Enqueue onto the existing local playlist without disrupting play.
+            was_empty = len(self.songs_model) == 0
+            first_new = len(self.songs_model)
+            for s in songs:
+                s.index = len(self.songs_model)
+                self.songs_model.append_song(s)
+                self.update_song_row(s)
+                self._set_local_art(s)
+            if was_empty or self.current_song_index is None:
+                self.start_song(first_new)
             return
 
         self.stop()

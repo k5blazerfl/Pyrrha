@@ -1109,6 +1109,12 @@ class SkinnedWindow(QWidget):
         jump = menu.addAction(_('Jump to File…') + '\tJ',
                               lambda: self.window().open_jump_to_file())
         jump.setEnabled(len(c.songs_model) > 0)
+        jump_time = menu.addAction(_('Jump to Time…') + '\tCtrl+J',
+                                   lambda: self.window().open_jump_to_time())
+        jump_time.setEnabled(c.seekable())
+        if hasattr(c, 'info_song'):
+            info = menu.addAction(_('File Info…') + '\tAlt+3', lambda: c.info_song())
+            info.setEnabled(c.current_song is not None)
         # Playback toggles — Options-menu parity with the sprites/clutterbar.
         shuffle = menu.addAction(_('Shuffle') + '\tS',
                                  lambda: (c.toggle_shuffle(), self.update()))
@@ -1237,6 +1243,7 @@ class SkinnedShell(QWidget):
         self.keep_above = False   # clutterbar "A" (KWin keep-above)
         self._activated_at = 0.0  # when the window last became active (click-to-focus)
         self._jump_dlg = None     # lazily-built Jump-to-File dialog (classic 'J')
+        self._jump_time_dlg = None  # lazily-built Jump-to-Time dialog (Ctrl+J)
         # Classic tear-off layout: each panel's *absolute* logical position inside
         # the screen-sized overlay ({'main'|'eq'|'pl': [x, y]}). Absolute (not
         # relative to main) so a torn-off panel stays put when the main window is
@@ -1880,16 +1887,40 @@ class SkinnedShell(QWidget):
         if getattr(self, '_skin_browser', None) is not None:
             self._skin_browser.reload()
 
+    @staticmethod
+    def _audio_paths(mime):
+        """Local audio files, playlists, or folders from a drag's mime data
+        (classic Winamp drop-to-add). Directories are handed to the controller,
+        which scans them for playable files."""
+        from ..local import AUDIO_EXTENSIONS, PLAYLIST_EXTENSIONS
+        out = []
+        if not mime.hasUrls():
+            return out
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            p = url.toLocalFile()
+            low = p.lower()
+            if (os.path.isdir(p) or low.endswith(AUDIO_EXTENSIONS)
+                    or low.endswith(PLAYLIST_EXTENSIONS)):
+                out.append(p)
+        return out
+
     def dragEnterEvent(self, event):
-        if self._skin_paths(event.mimeData()):
+        if self._skin_paths(event.mimeData()) or self._audio_paths(event.mimeData()):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        paths = self._skin_paths(event.mimeData())
-        if not paths:
+        # Skins take priority (a skin folder is also a directory); audio next.
+        skins = self._skin_paths(event.mimeData())
+        if skins:
+            self.install_and_apply_skin(skins[0])
+            event.acceptProposedAction()
             return
-        self.install_and_apply_skin(paths[0])
-        event.acceptProposedAction()
+        audio = self._audio_paths(event.mimeData())
+        if audio and hasattr(self.ctl, 'add_local_files'):
+            self.ctl.add_local_files(audio)
+            event.acceptProposedAction()
 
     def browse_skins(self):
         """Open the Winamp-style skin browser (Alt+S); reuse the one instance."""
@@ -1943,8 +1974,14 @@ class SkinnedShell(QWidget):
                 if self.main is not None:
                     self.main._clutter_action('A', None)
                 return True
+            if key == Qt.Key_J:            # Ctrl+J: jump to time
+                self.open_jump_to_time()
+                return True
             return False                   # leave other Ctrl combos alone
         if mods & (Qt.AltModifier | Qt.MetaModifier):
+            if (mods & Qt.AltModifier) and key == Qt.Key_3 and hasattr(c, 'info_song'):
+                c.info_song()              # Alt+3: file / song info
+                return True
             return False                   # Alt+S etc. handled above
         # Seek (Left/Right) and volume (Up/Down). Arrows reach here only when the
         # playlist did not already consume them for row navigation.
@@ -2000,6 +2037,14 @@ class SkinnedShell(QWidget):
         if self._jump_dlg is None:
             self._jump_dlg = JumpToFileDialog(self.ctl, self)
         self._jump_dlg.popup()
+
+    def open_jump_to_time(self):
+        """Open the classic Winamp 'Jump to Time' box (Ctrl+J). Seeking is a
+        no-op on Pandora, which is not seekable."""
+        from .jumpto import JumpToTimeDialog
+        if self._jump_time_dlg is None:
+            self._jump_time_dlg = JumpToTimeDialog(self.ctl, self)
+        self._jump_time_dlg.popup()
 
     def toggle_width(self):
         """Widen the player to reveal the album art beside the EQ (a square),

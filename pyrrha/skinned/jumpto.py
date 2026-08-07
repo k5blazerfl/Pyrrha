@@ -29,6 +29,48 @@ def _hex(color, fallback):
     return fallback
 
 
+def _theme_colors(shell):
+    """(bg, fg, current, selected) from the live playlist panel's PLEDIT.TXT
+    colors, falling back to classic Winamp green-on-black."""
+    pl = getattr(shell, 'pl', None)
+    return (_hex(getattr(pl, 'c_bg', None), _DEF['bg']),
+            _hex(getattr(pl, 'c_normal', None), _DEF['normal']),
+            _hex(getattr(pl, 'c_current', None), _DEF['current']),
+            _hex(getattr(pl, 'c_sel', None), _DEF['sel']))
+
+
+def _dialog_style(bg, fg, cur, sel):
+    """Shared stylesheet so the jump dialogs read as part of the skin."""
+    return (
+        'QDialog {{ background: {bg}; border: 1px solid {fg}; }}'
+        'QLineEdit {{ background: {bg}; color: {cur}; border: 1px solid {fg};'
+        ' padding: 3px; selection-background-color: {sel}; }}'
+        'QListWidget {{ background: {bg}; color: {fg}; border: none;'
+        ' outline: none; }}'
+        'QListWidget::item:selected {{ background: {sel}; color: {cur}; }}'
+        .format(bg=bg, fg=fg, cur=cur, sel=sel))
+
+
+def parse_time(text):
+    """Parse 'ss', 'm:ss' or 'h:mm:ss' into whole seconds; None if unparseable."""
+    text = (text or '').strip()
+    if not text:
+        return None
+    try:
+        parts = [int(p) for p in text.split(':')]
+    except ValueError:
+        return None
+    if not parts or any(p < 0 for p in parts):
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return None
+
+
 class JumpToFileDialog(QDialog):
     """Type-to-filter quick jump over the controller's song list."""
 
@@ -60,21 +102,7 @@ class JumpToFileDialog(QDialog):
 
     # ------------------------------------------------------------ theming
     def _apply_theme(self):
-        """Pull colors from the live playlist panel (already parsed from the
-        skin's PLEDIT.TXT), falling back to classic Winamp green-on-black."""
-        pl = getattr(self.shell, 'pl', None)
-        bg = _hex(getattr(pl, 'c_bg', None), _DEF['bg'])
-        fg = _hex(getattr(pl, 'c_normal', None), _DEF['normal'])
-        cur = _hex(getattr(pl, 'c_current', None), _DEF['current'])
-        sel = _hex(getattr(pl, 'c_sel', None), _DEF['sel'])
-        self.setStyleSheet(
-            'QDialog {{ background: {bg}; border: 1px solid {fg}; }}'
-            'QLineEdit {{ background: {bg}; color: {cur}; border: 1px solid {fg};'
-            ' padding: 3px; selection-background-color: {sel}; }}'
-            'QListWidget {{ background: {bg}; color: {fg}; border: none;'
-            ' outline: none; }}'
-            'QListWidget::item:selected {{ background: {sel}; color: {cur}; }}'
-            .format(bg=bg, fg=fg, cur=cur, sel=sel))
+        self.setStyleSheet(_dialog_style(*_theme_colors(self.shell)))
 
     # ------------------------------------------------------------ data
     def _load_entries(self):
@@ -154,3 +182,49 @@ class JumpToFileDialog(QDialog):
         step = {Qt.Key_Up: -1, Qt.Key_Down: 1,
                 Qt.Key_PageUp: -page, Qt.Key_PageDown: page}[key]
         self.list.setCurrentRow(min(count - 1, max(0, row + step)))
+
+
+class JumpToTimeDialog(QDialog):
+    """Classic Winamp 'Jump to Time' (Ctrl+J): type m:ss and seek there."""
+
+    def __init__(self, controller, shell):
+        super().__init__(shell, Qt.Popup | Qt.FramelessWindowHint)
+        self.ctl = controller
+        self.shell = shell
+        self.query = QLineEdit(self)
+        self.query.setPlaceholderText(_('Jump to time (m:ss)…'))
+        self.query.returnPressed.connect(self._accept)
+        self.query.installEventFilter(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(self.query)
+        self.setFixedWidth(220)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        self.setStyleSheet(_dialog_style(*_theme_colors(self.shell)))
+
+    def popup(self):
+        self._apply_theme()
+        self.query.clear()
+        self.adjustSize()
+        geo = self.shell.frameGeometry()
+        self.move(geo.center().x() - self.width() // 2,
+                  geo.center().y() - self.height() // 2)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.query.setFocus()
+
+    def _accept(self):
+        secs = parse_time(self.query.text())
+        if secs is not None and self.ctl.seekable():
+            self.ctl.seek(int(secs * 1_000_000_000))
+        self.close()
+
+    def eventFilter(self, obj, event):
+        if (obj is self.query and event.type() == QEvent.KeyPress
+                and event.key() == Qt.Key_Escape):
+            self.close()
+            return True
+        return super().eventFilter(obj, event)
