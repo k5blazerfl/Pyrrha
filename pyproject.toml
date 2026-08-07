@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyrrha"
-version = "0.4.47"
+version = "0.4.48"
 description = "A skinnable Qt (PySide6) audio player with classic Winamp 2.x fidelity — Pandora radio and local files; built on Pithos' core"
 readme = "pyrrha/README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 lastfm = ["pylast"]
 journald = ["systemd-python"]
+tags = ["mutagen"]
 
 [project.scripts]
 pyrrha = "pyrrha.__main__:main"

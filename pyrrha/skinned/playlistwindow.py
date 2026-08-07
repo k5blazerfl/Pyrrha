@@ -484,6 +484,8 @@ class SkinnedPlaylistWindow(QWidget):
             a.setEnabled(local and have_sel)
             a = m.addAction(_('Crop (keep selected)'), self._crop_to_selection)
             a.setEnabled(local and have_sel)
+            a = m.addAction(_('Remove Missing Files'), self._remove_missing)
+            a.setEnabled(local and len(self._rows()) > 0)
             a = m.addAction(_('Remove All'), self._clear_playlist)
             a.setEnabled(local and len(self._rows()) > 0)
         elif btn == 'sel':
@@ -497,6 +499,8 @@ class SkinnedPlaylistWindow(QWidget):
             srt.addAction(_('By Artist'), lambda: c.sort_songs('artist'))
             srt.addAction(_('Reverse'), lambda: c.sort_songs('reverse'))
             srt.addAction(_('Randomize'), lambda: c.sort_songs('random'))
+            a = m.addAction(_('Scan ReplayGain'), c.scan_replaygain_local)
+            a.setEnabled(local and len(self._rows()) > 0)
         elif btn == 'list':
             a = m.addAction(_('New Playlist'), self._clear_playlist)
             a.setEnabled(local)
@@ -510,6 +514,13 @@ class SkinnedPlaylistWindow(QWidget):
     def _scroll_to_current(self):
         self._follow = True     # re-enable follow: the next paint centres on it
         self.update()
+
+    def _remove_missing(self):
+        """Drop rows whose file is gone (delegates to the controller)."""
+        if self.ctl.remove_missing_local():
+            self._selection = set()
+            self._focus = self._anchor = None
+            self.update()
 
     def _reveal(self, song):
         """Open the containing folder of a local track in the file manager."""
@@ -865,6 +876,7 @@ class SkinnedPlaylistWindow(QWidget):
         menu = QMenu(self)
         if c.local_mode:
             menu.addAction(_('Play'), self._play_focus)
+            menu.addAction(_('Edit Tags…') + '\tAlt+3', lambda: c.edit_local_tags(song))
             rem = menu.addAction(_('Remove Selected'), self._remove_selection)
             rem.setEnabled(bool(self._selection))
             rev = menu.addAction(_('Reveal in File Manager'), lambda: self._reveal(song))
