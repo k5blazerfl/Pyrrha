@@ -203,6 +203,14 @@ class SkinnedEqWindow(QWidget):
     def display_height(self):
         return int((TITLE_H if self._collapsed else H) * self._scale())
 
+    def shape_region(self):
+        """Non-rectangular mask for shaped skins (region.txt), in local coords at
+        the current scale; None when rectangular or widened for the album art."""
+        if self._lw() > W:
+            return None
+        sec = 'equalizerws' if self._collapsed else 'equalizer'
+        return self.skin.region(sec, self._scale())
+
     def _toggle_collapse(self):
         shell = self.window()
         if hasattr(shell, 'toggle_shade'):

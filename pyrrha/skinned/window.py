@@ -968,17 +968,16 @@ class SkinnedWindow(QWidget):
                     a = skin_menu.addAction(name, lambda *args, p=path: self.window().load_skin(p))
                     a.setCheckable(True)
                     a.setChecked(path == current_path)
-        mode_menu = menu.addMenu(_('Mode'))
+        mode_menu = menu.addMenu(_('UI'))
         shell = self.window()
         cur_mode = getattr(shell, 'mode', 'modern')
-        cm = mode_menu.addAction(_('Classic Skins'), lambda: shell.set_mode('classic'))
-        cm.setCheckable(True)
-        cm.setChecked(cur_mode == 'classic')
-        mm = mode_menu.addAction(_('Modern Skin'), lambda: shell.set_mode('modern'))
-        mm.setCheckable(True)
-        mm.setChecked(cur_mode == 'modern')
+        # Only offer the mode you're not already in (plus the standard view).
+        if cur_mode != 'classic':
+            mode_menu.addAction(_('WinAMP 2.x'), lambda: shell.set_mode('classic'))
+        if cur_mode != 'modern':
+            mode_menu.addAction(_('Pyrrha'), lambda: shell.set_mode('modern'))
         mode_menu.addSeparator()
-        mode_menu.addAction(_('Standard'), c.show_standard_view)
+        mode_menu.addAction(_('Pithos'), c.show_standard_view)
         menu.addSeparator()
         menu.addAction(_('Quit'), c.quit)
         menu.exec(global_pos)
@@ -1001,6 +1000,15 @@ class SkinnedWindow(QWidget):
     def display_height(self):
         h = TITLEBAR[3] if self._collapsed else H   # windowshade → title bar only
         return int(h * self._scale())
+
+    def shape_region(self):
+        """Non-rectangular mask for shaped skins (region.txt), in local coords at
+        the current scale; None when the skin is rectangular or the window is
+        widened (region.txt only describes the native-width window)."""
+        if self._lw() > W:
+            return None
+        sec = 'windowshade' if self._collapsed else 'normal'
+        return self.skin.region(sec, self._scale())
 
     def _toggle_shade(self):
         shell = self.window()
@@ -1289,7 +1297,10 @@ class SkinnedShell(QWidget):
             y = max(0, min(oh - p.height(), y))
             p.move(x, y)
             p.setVisible(True)
-            region += QRegion(x, y, p.width(), p.height())
+            # Shaped skins (region.txt) mask out corners; fall back to the full
+            # rect for rectangular panels (and the playlist, always rectangular).
+            shp = p.shape_region() if hasattr(p, 'shape_region') else None
+            region += shp.translated(x, y) if shp is not None else QRegion(x, y, p.width(), p.height())
         # setMask clips both input *and* our own painting, so we can only clear
         # pixels inside the mask — a panel that moved leaves its old pixels behind
         # (outside the new mask) as a trail. So temporarily widen the mask to the

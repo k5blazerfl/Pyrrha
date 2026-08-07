@@ -11,7 +11,25 @@ import logging
 import os
 import zipfile
 
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QImage, QPolygon, QRegion
+
+
+def _ints(s):
+    """Parse a comma/semicolon/space separated list of integers, tolerantly."""
+    out = []
+    for tok in s.replace(';', ',').replace(' ', ',').split(','):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(int(tok))
+        except ValueError:
+            try:
+                out.append(int(float(tok)))
+            except ValueError:
+                pass
+    return out
 
 
 class Skin:
@@ -27,6 +45,8 @@ class Skin:
         self._raw = {}       # basename.lower() -> bytes (BMPs)
         self._text = {}      # basename.lower() -> str (config .txt)
         self._images = {}
+        self._regions = None       # region.txt polygons, parsed lazily
+        self._region_cache = {}    # (section, scale) -> QRegion
 
         if os.path.isdir(path):
             for fn in os.listdir(path):
@@ -72,3 +92,62 @@ class Skin:
         if img.isNull():
             return QImage()
         return img.copy(x, y, w, h)
+
+    # ------------------------------------------------------------ region.txt
+    def _parse_regions(self):
+        """Parse region.txt into {section: [polygon, ...]} where each polygon is
+        a list of (x, y) points at native size. region.txt masks non-rectangular
+        skins; sections are Normal / WindowShade / Equalizer / EqualizerWS, each
+        with NumPoints (points-per-polygon) and a flat PointList of x,y pairs."""
+        self._regions = {}
+        text = self.text('region.txt')
+        if not text:
+            return
+        raw = {}   # section -> {'numpoints': str, 'pointlist': str}
+        cur = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line[0] in ';#':
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                cur = line[1:-1].strip().lower()
+                raw.setdefault(cur, {'numpoints': '', 'pointlist': ''})
+            elif cur is not None and '=' in line:
+                key, val = line.split('=', 1)
+                key = key.strip().lower()
+                if key in ('numpoints', 'pointlist'):
+                    raw[cur][key] += (',' if raw[cur][key] else '') + val
+        for sec, d in raw.items():
+            counts = _ints(d['numpoints'])
+            coords = _ints(d['pointlist'])
+            pts = [(coords[i], coords[i + 1]) for i in range(0, len(coords) - 1, 2)]
+            polys, idx = [], 0
+            for c in (counts or [len(pts)]):
+                poly = pts[idx:idx + c]
+                idx += c
+                if len(poly) >= 3:
+                    polys.append(poly)
+            if polys:
+                self._regions[sec] = polys
+
+    def region(self, section, scale=1.0):
+        """A QRegion for a window state ('normal', 'windowshade', 'equalizer',
+        'equalizerws') from region.txt, scaled to the given UI scale; or None if
+        this skin defines no region for that state (i.e. it is rectangular)."""
+        if self._regions is None:
+            self._parse_regions()
+        section = section.lower()
+        polys = self._regions.get(section)
+        if not polys:
+            return None
+        key = (section, round(scale, 3))
+        cached = self._region_cache.get(key)
+        if cached is not None:
+            return cached
+        reg = QRegion()
+        for poly in polys:
+            qp = QPolygon([QPoint(round(x * scale), round(y * scale)) for x, y in poly])
+            reg = reg.united(QRegion(qp))
+        reg = reg if not reg.isEmpty() else None
+        self._region_cache[key] = reg
+        return reg
