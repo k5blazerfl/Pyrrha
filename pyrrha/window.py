@@ -959,7 +959,49 @@ class PyrrhaWindow(QMainWindow):
         elif self.current_song_index is not None and row < self.current_song_index:
             self.current_song_index -= 1
         self.songs_model.remove_row(row)
-        for r in range(len(self.songs_model)):        # keep song.index == row
+        self._reindex_songs()
+
+    def remove_songs(self, rows):
+        """Remove several rows (local playback). Descending order keeps indices
+        valid as each is removed."""
+        for r in sorted(set(rows), reverse=True):
+            self.remove_song(r)
+
+    def clear_playlist(self):
+        """Empty the local playlist and stop playback."""
+        if not self.local_mode:
+            return
+        self.stop()
+        self.current_song_index = None
+        self.songs_model.clear()
+
+    def sort_songs(self, key):
+        """Reorder the local playlist by 'title', 'artist', 'reverse' or
+        'random', keeping the current song current."""
+        if not self.local_mode or len(self.songs_model) < 2:
+            return
+        cur_song = self.current_song
+        n = len(self.songs_model)
+        songs = [self.songs_model.song_at(i) for i in range(n)]
+        order = list(range(n))
+        if key == 'title':
+            order.sort(key=lambda i: (songs[i].title or '').lower())
+        elif key == 'artist':
+            order.sort(key=lambda i: (songs[i].artist or '').lower())
+        elif key == 'reverse':
+            order.reverse()
+        elif key == 'random':
+            random.shuffle(order)
+        self.songs_model.reorder(order)
+        self._reindex_songs()
+        if cur_song is not None:
+            for r in range(len(self.songs_model)):
+                if self.songs_model.song_at(r) is cur_song:
+                    self.current_song_index = r
+                    break
+
+    def _reindex_songs(self):
+        for r in range(len(self.songs_model)):     # keep song.index == its row
             self.songs_model.song_at(r).index = r
 
     def next_song(self, *ignore):
