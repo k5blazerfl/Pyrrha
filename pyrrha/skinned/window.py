@@ -958,6 +958,8 @@ class SkinnedWindow(QWidget):
         # whatever skin is loaded).
         if getattr(self.window(), 'mode', 'modern') == 'classic':
             skin_menu = menu.addMenu(_('Skin'))
+            skin_menu.addAction(_('Browse Skins…') + '\tAlt+S', lambda: self.window().browse_skins())
+            skin_menu.addSeparator()
             skin_menu.addAction(_('Load Skin File…'), self._load_skin_file)
             skin_menu.addAction(_('Load Skin Folder…'), self._load_skin_folder)
             available = c.available_skins()
@@ -1051,6 +1053,7 @@ class SkinnedShell(QWidget):
         self._foff = {}           # each moving panel's device offset from the dragged one
         self._fraw = None         # dragged panel's un-snapped device pos (avoids snap wobble)
         self._flast = None        # last global cursor point (for delta tracking)
+        self._skin_browser = None  # the Alt+S skin browser dialog (lazily built)
         # Classic mode uses the user's chosen skin; Modern always uses the
         # bundled Glare (the curated album-art experience).
         self._classic_skin = skin
@@ -1060,6 +1063,8 @@ class SkinnedShell(QWidget):
         # Accept keyboard focus so the shell receives key presses (used by the
         # classic "nullsoft" easter egg); no child panel takes focus.
         self.setFocusPolicy(Qt.StrongFocus)
+        # Drop a .wsz / skin folder onto the window to install and apply it.
+        self.setAcceptDrops(True)
         # Translucent surface so the gaps around torn-off classic panels are
         # genuinely see-through (setMask alone isn't honored visually on some
         # Wayland compositors, which leaves black there). Modern paints its own
@@ -1588,7 +1593,65 @@ class SkinnedShell(QWidget):
             self.main.change_volume(notches / 27.0)   # one 28-step slider notch
             event.accept()
 
+    @staticmethod
+    def _skin_paths(mime):
+        """Local skin paths (.wsz/.zip files or folders with a main.bmp) from a
+        drag's mime data."""
+        out = []
+        if not mime.hasUrls():
+            return out
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            p = url.toLocalFile()
+            if p.lower().endswith(('.wsz', '.zip')):
+                out.append(p)
+            elif os.path.isdir(p):
+                try:
+                    if any(f.lower() == 'main.bmp' for f in os.listdir(p)):
+                        out.append(p)
+                except OSError:
+                    pass
+        return out
+
+    def install_and_apply_skin(self, path):
+        """Install a dropped/loaded skin into the library and show it (switching
+        to WinAMP 2.x so it's visible). Refreshes the browser if it's open."""
+        installed = self.ctl.install_skin(path) if hasattr(self.ctl, 'install_skin') else path
+        if self.mode != 'classic':
+            self.set_mode('classic')
+        self.load_skin(installed)
+        if getattr(self, '_skin_browser', None) is not None:
+            self._skin_browser.reload()
+
+    def dragEnterEvent(self, event):
+        if self._skin_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = self._skin_paths(event.mimeData())
+        if not paths:
+            return
+        self.install_and_apply_skin(paths[0])
+        event.acceptProposedAction()
+
+    def browse_skins(self):
+        """Open the Winamp-style skin browser (Alt+S); reuse the one instance."""
+        if getattr(self, '_skin_browser', None) is None:
+            from ..dialogs.skinbrowser import SkinBrowser
+            self._skin_browser = SkinBrowser(self, self.ctl, self)
+        else:
+            self._skin_browser.reload()
+        self._skin_browser.show()
+        self._skin_browser.raise_()
+        self._skin_browser.activateWindow()
+
     def keyPressEvent(self, event):
+        # Alt+S opens the skin browser (classic Winamp shortcut).
+        if event.key() == Qt.Key_S and (event.modifiers() & Qt.AltModifier):
+            self.browse_skins()
+            event.accept()
+            return
         # Feed keys to the classic "nullsoft" easter egg matcher.
         if self.main is not None and self.main.egg_key(event):
             event.accept()
