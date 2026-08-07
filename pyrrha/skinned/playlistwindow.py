@@ -48,6 +48,13 @@ MP_BTN_Y, MP_BTN_H = 24, 13              # transport button row (y band)
 MP_BTNS = (('prev', 4, 10), ('play', 14, 10), ('pause', 24, 10),
            ('stop', 34, 10), ('next', 44, 11), ('eject', 55, 13))
 
+# Up/down list-scroll arrows baked into the bottom-right corner sprite (classic
+# PLEDIT), right of the LIST button. Corner-relative coords (origin =
+# (width-150, height-FRAME_B)); measured from the base 2.91 skin's pledit.bmp.
+PL_SCROLL_X, PL_SCROLL_W = 132, 14
+PL_SCROLL_UP = (0, 7)                    # up arrow: (y, height)
+PL_SCROLL_DN = (7, 7)                    # down arrow: (y, height)
+
 
 def _fmt_time(secs):
     secs = int(secs)
@@ -109,6 +116,10 @@ class SkinnedPlaylistWindow(QWidget):
         self._drag_scroll_timer = QTimer(self)
         self._drag_scroll_timer.setInterval(120)
         self._drag_scroll_timer.timeout.connect(self._drag_scroll_tick)
+        # Bottom-right corner scroll arrows: held state + auto-repeat.
+        self._scroll_btn_held = None      # 'up'/'down' while an arrow is held
+        self._scroll_btn_timer = QTimer(self)
+        self._scroll_btn_timer.timeout.connect(self._scroll_btn_tick)
 
         # A new song re-enables follow so the view snaps to what's now playing;
         # between songs the user can scroll the list freely.
@@ -270,6 +281,36 @@ class SkinnedPlaylistWindow(QWidget):
 
     def _scroll_by(self, delta_rows):
         self._scroll_to(self._scroll + delta_rows)
+
+    def _scroll_button_at(self, pos):
+        """'up'/'down' if ``pos`` is over the bottom-right corner scroll arrows,
+        else None. The arrows are baked into the corner sprite (classic PLEDIT),
+        so they're always drawn when the frame is shown — this makes them live."""
+        if not self._frame_on() or self._collapsed:
+            return None
+        cx, cy = self._lw() - 150, self._lh() - FRAME_B
+        lx, ly = pos.x() - cx, pos.y() - cy
+        if not (PL_SCROLL_X <= lx < PL_SCROLL_X + PL_SCROLL_W):
+            return None
+        if PL_SCROLL_UP[0] <= ly < PL_SCROLL_UP[0] + PL_SCROLL_UP[1]:
+            return 'up'
+        if PL_SCROLL_DN[0] <= ly < PL_SCROLL_DN[0] + PL_SCROLL_DN[1]:
+            return 'down'
+        return None
+
+    def _press_scroll_button(self, which):
+        """Scroll one row now, then auto-repeat while the arrow is held."""
+        self._scroll_btn_held = which
+        self._scroll_by(-1 if which == 'up' else 1)
+        self._scroll_btn_timer.start(300)   # initial delay; _tick speeds it up
+        self.update()
+
+    def _scroll_btn_tick(self):
+        if self._scroll_btn_held is None:
+            self._scroll_btn_timer.stop()
+            return
+        self._scroll_btn_timer.setInterval(70)   # fast repeat after the first delay
+        self._scroll_by(-1 if self._scroll_btn_held == 'up' else 1)
 
     def _sb_geom(self):
         """Scrollbar as (thumb_rect, track_top, track_h) in logical px for the
@@ -658,6 +699,10 @@ class SkinnedPlaylistWindow(QWidget):
                 if name == self._mp_pressed:
                     p.fillRect(cx + bx, cy + MP_BTN_Y, bw, MP_BTN_H, QColor(0, 0, 0, 90))
                     break
+        # Same subtle darken for a held scroll arrow.
+        if self._scroll_btn_held is not None:
+            ry, rh = PL_SCROLL_UP if self._scroll_btn_held == 'up' else PL_SCROLL_DN
+            p.fillRect(cx + PL_SCROLL_X, cy + ry, PL_SCROLL_W, rh, QColor(0, 0, 0, 90))
 
     def _mp_colon_x(self):
         """The x of the skin's baked time ':' (corner coords), detected once and
@@ -750,6 +795,11 @@ class SkinnedPlaylistWindow(QWidget):
                 else:
                     self._scroll_by(self._capacity())
                 return
+        # Bottom-right corner scroll arrows (up/down, baked into the sprite).
+        sbtn = self._scroll_button_at(pos)
+        if sbtn is not None:
+            self._press_scroll_button(sbtn)
+            return
         # Bottom-bar buttons (Add / Rem / Sel / Misc / List).
         btn = self._bottom_button_at(pos)
         if btn is not None:
@@ -890,6 +940,10 @@ class SkinnedPlaylistWindow(QWidget):
     def mouseReleaseEvent(self, event):
         if self._mp_pressed:                       # release the mini-transport button
             self._mp_pressed = None
+            self.update()
+        if self._scroll_btn_held is not None:      # release a held scroll arrow
+            self._scroll_btn_held = None
+            self._scroll_btn_timer.stop()
             self.update()
         if getattr(self, '_titledrag', False):
             self._titledrag = False
