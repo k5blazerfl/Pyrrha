@@ -33,7 +33,10 @@ class JumpToFileDialog(QDialog):
     """Type-to-filter quick jump over the controller's song list."""
 
     def __init__(self, controller, shell):
-        super().__init__(shell, Qt.FramelessWindowHint | Qt.Dialog)
+        # Qt.Popup: Qt holds a mouse grab and dismisses on a click outside the
+        # dialog itself, independent of compositor focus events (WindowDeactivate
+        # is unreliable under KWin/Wayland). Same idiom menus/completers use.
+        super().__init__(shell, Qt.Popup | Qt.FramelessWindowHint)
         self.ctl = controller
         self.shell = shell
         self._entries = []   # [(index, label, label_lower)] for the full list
@@ -151,9 +154,3 @@ class JumpToFileDialog(QDialog):
         step = {Qt.Key_Up: -1, Qt.Key_Down: 1,
                 Qt.Key_PageUp: -page, Qt.Key_PageDown: page}[key]
         self.list.setCurrentRow(min(count - 1, max(0, row + step)))
-
-    def event(self, e):
-        # Dismiss when the popup loses focus (click elsewhere), like a menu.
-        if e.type() == QEvent.WindowDeactivate and self.isVisible():
-            self.close()
-        return super().event(e)
