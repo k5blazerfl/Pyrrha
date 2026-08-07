@@ -2035,11 +2035,68 @@ class PyrrhaWindow(QMainWindow):
             self.worker_run(song.bookmark_artist, (), None, "Bookmarking...")
 
     def info_song(self, *ignore, song=None):
-        if self.local_mode:
-            return
         song = song or self.current_song
+        if self.local_mode:
+            if song is not None:
+                self.edit_local_tags(song)
+            return
         if song:
             self.open_url(song.songDetailURL)
+
+    def edit_local_tags(self, song):
+        """Open the tag editor for a local file (Alt+3 / playlist menu)."""
+        if not local.tags_editable():
+            QMessageBox.information(
+                self, _('Edit Tags'),
+                _('Tag editing needs the “mutagen” package (pip install mutagen).'))
+            return
+        from .dialogs.tags import TagEditorDialog
+        TagEditorDialog(song, self._on_tags_saved, self).show()
+
+    def _on_tags_saved(self, song):
+        self.update_song_row(song)
+        self.metadata_changed.emit(song)
+
+    def remove_missing_local(self):
+        """Drop local rows whose file no longer exists. Returns the count."""
+        if not self.local_mode:
+            return 0
+        missing = [i for i in range(len(self.songs_model))
+                   if not os.path.exists(getattr(self.songs_model.song_at(i), 'path', ''))]
+        if missing:
+            self.remove_songs(missing)
+        return len(missing)
+
+    def scan_replaygain_local(self):
+        """Scan the local playlist's ReplayGain track gains on a worker thread
+        and store them on the songs (applied by the ReplayGain plugin)."""
+        if not self.local_mode:
+            return
+        songs = [self.songs_model.song_at(i) for i in range(len(self.songs_model))]
+        by_path = {s.path: s for s in songs if s is not None and getattr(s, 'path', None)}
+        paths = list(by_path)
+        if not paths:
+            return
+        self.status_push('net', _('Scanning ReplayGain…'))
+
+        def done(result):
+            self.status_pop('net')
+            result = result or {}
+            for path, gain in result.items():
+                s = by_path.get(path)
+                if s is not None:
+                    s.trackGain = gain
+            cur = self.current_song
+            if cur is not None and hasattr(self, 'rgvolume'):
+                try:
+                    self.rgvolume.set_property('fallback-gain', getattr(cur, 'trackGain', 0.0))
+                except Exception:
+                    pass
+            QMessageBox.information(
+                self, _('ReplayGain'),
+                _('Scanned {} of {} tracks.').format(len(result), len(paths)))
+
+        self.worker_run(local.scan_replaygain, (paths,), done, _('Scanning ReplayGain…'))
 
     def create_artist_station(self, song):
         user_data = ('artist', html.escape(song.artist))

@@ -111,6 +111,7 @@ class LocalSong:
         self.trackLength = self.get_duration_sec()
 
         # Fields the window/models read on a Song. Kept inert for local files.
+        self.trackGain = 0.0            # ReplayGain track gain (dB); set by a scan
         self.bitrate = None
         self.position = None
         self.start_time = None
@@ -175,6 +176,123 @@ class LocalSong:
 
     def __repr__(self):
         return '<LocalSong "{}" by "{}">'.format(self.title, self.artist)
+
+
+# -- tag editing (optional; needs mutagen) ---------------------------------
+
+try:
+    import mutagen
+except ImportError:
+    mutagen = None
+
+# Editable fields, in display order, via mutagen's Easy interface (portable
+# across MP3/FLAC/Ogg/MP4).
+TAG_KEYS = ('title', 'artist', 'album', 'albumartist', 'tracknumber',
+            'genre', 'date', 'comment')
+
+
+def tags_editable():
+    """Whether tag editing is available (mutagen installed)."""
+    return mutagen is not None
+
+
+def read_tags(path):
+    """Current editable tags as {key: str}, or None if the format has no tag
+    support (or mutagen is missing)."""
+    if mutagen is None:
+        return None
+    try:
+        f = mutagen.File(path, easy=True)
+    except Exception as e:
+        logging.info('Could not read tags for %s: %s', path, e)
+        return None
+    if f is None:
+        return None
+    out = {}
+    for k in TAG_KEYS:
+        v = f.get(k)
+        out[k] = v[0] if isinstance(v, list) and v else (v or '')
+    return out
+
+
+def write_tags(path, values):
+    """Write {key: str} tags with mutagen (empty values delete the tag).
+    Returns True on success."""
+    if mutagen is None:
+        return False
+    try:
+        f = mutagen.File(path, easy=True)
+        if f is None:
+            return False
+        for k, v in values.items():
+            if v:
+                f[k] = [v]
+            elif k in f:
+                del f[k]
+        f.save()
+        return True
+    except Exception as e:
+        logging.warning('Failed to write tags for %s: %s', path, e)
+        return False
+
+
+# -- ReplayGain scanning (rganalysis) --------------------------------------
+
+def scan_replaygain(paths, progress=None):
+    """Compute ReplayGain track gain (dB) for each path via GStreamer's
+    ``rganalysis``. Returns {path: gain_db} for those that scanned. ``progress``
+    (if given) is called as ``progress(done, total)``. Runs synchronously — call
+    it from a worker thread."""
+    result = {}
+    total = len(paths)
+    for i, path in enumerate(paths):
+        gain = _scan_one_replaygain(path)
+        if gain is not None:
+            result[path] = gain
+        if progress is not None:
+            progress(i + 1, total)
+    return result
+
+
+def _scan_one_replaygain(path):
+    src = Gst.ElementFactory.make('uridecodebin', None)
+    conv = Gst.ElementFactory.make('audioconvert', None)
+    resample = Gst.ElementFactory.make('audioresample', None)
+    rg = Gst.ElementFactory.make('rganalysis', None)
+    sink = Gst.ElementFactory.make('fakesink', None)
+    if not all((src, conv, resample, rg, sink)):
+        return None
+    pipe = Gst.Pipeline.new('rgscan')
+    src.set_property('uri', Gst.filename_to_uri(os.path.abspath(path)))
+    rg.set_property('num-tracks', 1)
+    for el in (src, conv, resample, rg, sink):
+        pipe.add(el)
+    conv.link(resample)
+    resample.link(rg)
+    rg.link(sink)
+
+    def _on_pad(_el, pad):
+        sinkpad = conv.get_static_pad('sink')
+        if not sinkpad.is_linked():
+            pad.link(sinkpad)
+    src.connect('pad-added', _on_pad)
+
+    pipe.set_state(Gst.State.PLAYING)
+    bus = pipe.get_bus()
+    want = Gst.MessageType.TAG | Gst.MessageType.EOS | Gst.MessageType.ERROR
+    gain = None
+    while True:
+        msg = bus.timed_pop_filtered(30 * Gst.SECOND, want)
+        if msg is None:
+            break
+        if msg.type == Gst.MessageType.TAG:
+            ok, g = msg.parse_tag().get_double(Gst.TAG_TRACK_GAIN)
+            if ok:
+                gain = g
+        else:                       # EOS or ERROR
+            break
+    pipe.set_state(Gst.State.NULL)
+    return gain
 
 
 def collect_audio_files(paths):
