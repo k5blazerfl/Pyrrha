@@ -1537,11 +1537,18 @@ class PyrrhaWindow(QMainWindow):
     def bundled_skins_dir(self):
         return os.path.join(os.path.dirname(__file__), 'skins')
 
+    def themes_dir(self):
+        """The project's themes/ folder — a curated skin collection scanned into
+        the library alongside the bundled and user skins (absent when installed,
+        which is fine: available_skins skips missing directories)."""
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'themes')
+
     def available_skins(self):
-        """[(name, path)] of skins: those bundled with Pyrrha plus the user's
-        (~/.local/share/pyrrha/skins) — .wsz files and folders with a main.bmp."""
+        """[(name, path)] of skins: those bundled with Pyrrha, the project's
+        themes/ collection, and the user's (~/.local/share/pyrrha/skins) —
+        .wsz files and folders with a main.bmp."""
         out, seen = [], set()
-        for base in (self.bundled_skins_dir(), self.skins_dir()):
+        for base in (self.bundled_skins_dir(), self.themes_dir(), self.skins_dir()):
             try:
                 entries = sorted(os.listdir(base))
             except OSError:
