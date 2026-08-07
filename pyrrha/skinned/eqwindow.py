@@ -134,6 +134,7 @@ class SkinnedEqWindow(QWidget):
         self._closed = False
         self._well_cache = {}       # frame index -> magenta-keyed QImage
         self._wells_present = None   # does this skin have slider wells?
+        self._well_offset = None     # x offset to center the well under the thumb
         self._curve_colors_cache = None   # per-row EQ response-curve colors
 
         # Repaint the album art when the song or its artwork changes. The model's
@@ -151,22 +152,56 @@ class SkinnedEqWindow(QWidget):
         self.skin = skin
         self._well_cache = {}
         self._wells_present = None
+        self._well_offset = None
         self._curve_colors_cache = None
         self.update()
 
     # ----------------------------------------------------------- slider wells
     def _has_wells(self):
+        """Does this skin ship real slider-well graphics? Winamp draws the well
+        (the slider track / VU bar) under each thumb. Skins that omit it key the
+        well region out with magenta (Winamp's "empty" convention, e.g. Glare);
+        a skin with real wells fills the region with solid graphics. Detecting
+        this by the magenta fraction handles grayscale wells (e.g. the Classified
+        skin) too — a color-saturation test misread those as empty, so wells were
+        skipped and the thumb's opaque corners boxed out on the light track."""
         if self._wells_present is None:
             img = self.skin.image('eqmain.bmp')
             present = False
             if not img.isNull() and img.height() >= WELL_TOP + WELL_H:
-                for fx in (17, 152, 212):     # a few well centers
-                    c = img.pixelColor(fx, 190)
-                    if max(c.red(), c.green(), c.blue()) - min(c.red(), c.green(), c.blue()) > 50:
-                        present = True
-                        break
+                mag = tot = 0
+                for x in range(8, 240, 4):
+                    for y in range(164, 227, 4):     # the (row-0) well strip
+                        tot += 1
+                        if (img.pixel(x, y) & 0xFFFFFF) == MAGENTA:
+                            mag += 1
+                present = tot > 0 and mag < tot * 0.1   # mostly solid ⇒ real wells
             self._wells_present = present
         return self._wells_present
+
+    def _well_x_offset(self):
+        """Where to draw a well (relative to the slider column) so its groove
+        sits under the thumb. Skins place the slider track at different x within
+        the well cell, so derive it from the sprite rather than assuming it's
+        centered: locate the groove as the horizontal centre-of-mass of the
+        columns that differ most from the well's edge columns, and offset so it
+        lands under the thumb centre. Verified across a skin corpus to centre
+        every skin (vs a fixed offset that left some off by a few px). Cached."""
+        if self._well_offset is None:
+            off = -2   # fallback if the well sprite is unreadable
+            w = self.skin.sprite('eqmain.bmp', 13, 164, WELL_W, WELL_H)
+            if not w.isNull():
+                rows = list(range(10, WELL_H - 10, 3))
+                cv = [sum((lambda c: (c.red() + c.green() + c.blue()) // 3)(w.pixelColor(x, y))
+                          for y in rows) / len(rows) for x in range(WELL_W)]
+                edge = (cv[0] + cv[1] + cv[-1] + cv[-2]) / 4
+                wt = [abs(v - edge) for v in cv]
+                total = sum(wt)
+                if total >= 1:
+                    groove = sum(x * wt[x] for x in range(WELL_W)) / total
+                    off = round(THUMB_W // 2 - groove)
+            self._well_offset = off
+        return self._well_offset
 
     def _well_sprite(self, frame):
         img = self._well_cache.get(frame)
@@ -382,9 +417,10 @@ class SkinnedEqWindow(QWidget):
 
         # Slider wells (the colored VU bar behind each thumb), if the skin has them.
         if self._has_wells():
-            p.drawImage(self._col_x(-1) - 2, WELL_TOP, self._well_sprite(self._band_frame(self._preamp)))
+            wx = self._well_x_offset()
+            p.drawImage(self._col_x(-1) + wx, WELL_TOP, self._well_sprite(self._band_frame(self._preamp)))
             for i in range(BANDS):
-                p.drawImage(self._col_x(i) - 2, WELL_TOP,
+                p.drawImage(self._col_x(i) + wx, WELL_TOP,
                             self._well_sprite(self._band_frame(self._bands[i])))
 
         # Sliders (preamp + 10 bands).

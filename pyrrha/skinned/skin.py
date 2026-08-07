@@ -78,13 +78,42 @@ class Skin:
     def image(self, name):
         name = name.lower()
         if name not in self._images:
-            img = QImage()
             data = self._raw.get(name)
-            if data:
-                if not img.loadFromData(data, 'BMP'):
-                    logging.warning('Failed to decode skin bitmap %s', name)
+            img = self._decode(data)
+            if img.isNull() and data:
+                logging.warning('Failed to decode skin bitmap %s', name)
             self._images[name] = img
         return self._images[name]
+
+    @staticmethod
+    def _decode(data):
+        """Decode skin-bitmap bytes tolerantly. Real skins aren't always clean
+        BMPs: some save a PNG/GIF under a .bmp name, others ship BMP variants
+        Qt's loader rejects. Try Qt's format sniffing first (which also catches
+        the renamed formats), then an explicit BMP hint, then a Pillow fallback
+        (if installed) that copes with the odd headers Qt won't."""
+        if not data:
+            return QImage()
+        img = QImage()
+        if img.loadFromData(data) or img.loadFromData(data, 'BMP'):
+            return img
+        return Skin._pillow_decode(data)
+
+    @staticmethod
+    def _pillow_decode(data):
+        try:
+            import io
+            from PIL import Image
+        except Exception:
+            return QImage()
+        try:
+            pim = Image.open(io.BytesIO(data)).convert('RGBA')
+        except Exception:
+            return QImage()
+        w, h = pim.size
+        # Detach from the transient buffer with copy(); RGBA8888 matches PIL's
+        # 'raw' RGBA byte order.
+        return QImage(pim.tobytes('raw', 'RGBA'), w, h, QImage.Format_RGBA8888).copy()
 
     def sprite(self, name, x, y, w, h):
         """A w×h QImage cut from bitmap ``name`` at (x, y); empty if missing."""
