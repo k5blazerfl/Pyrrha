@@ -65,14 +65,7 @@ class SkinnedPlaylistWindow(QWidget):
         self.skin = skin
         self.setWindowTitle('Pyrrha Playlist')
 
-        colors = self._parse_pledit(skin.text('pledit.txt'))
-        self.c_normal = _color(colors.get('normal'), DEFAULTS['normal'])
-        self.c_current = _color(colors.get('current'), DEFAULTS['current'])
-        self.c_bg = _color(colors.get('normalbg'), DEFAULTS['normalbg'])
-        self.c_sel = _color(colors.get('selectedbg'), DEFAULTS['selectedbg'])
-
-        self._font = QFont('monospace')
-        self._font.setPixelSize(9)
+        self._apply_pledit_theme(skin)
         self._collapsed = False
         self._closed = False
         self._resizing = False
@@ -90,12 +83,21 @@ class SkinnedPlaylistWindow(QWidget):
 
     def set_skin(self, skin):
         self.skin = skin
-        colors = self._parse_pledit(skin.text('pledit.txt'))
-        self.c_normal = _color(colors.get('normal'), DEFAULTS['normal'])
-        self.c_current = _color(colors.get('current'), DEFAULTS['current'])
-        self.c_bg = _color(colors.get('normalbg'), DEFAULTS['normalbg'])
-        self.c_sel = _color(colors.get('selectedbg'), DEFAULTS['selectedbg'])
+        self._apply_pledit_theme(skin)
         self.update()
+
+    def _apply_pledit_theme(self, skin):
+        """Load the playlist colors and font from the skin's PLEDIT.TXT (with
+        classic-Winamp fallbacks). Font is the skin's face name at the fixed
+        classic list size; falls back to monospace when unspecified."""
+        cfg = self._parse_pledit(skin.text('pledit.txt'))
+        self.c_normal = _color(cfg.get('normal'), DEFAULTS['normal'])
+        self.c_current = _color(cfg.get('current'), DEFAULTS['current'])
+        self.c_bg = _color(cfg.get('normalbg'), DEFAULTS['normalbg'])
+        self.c_sel = _color(cfg.get('selectedbg'), DEFAULTS['selectedbg'])
+        family = cfg.get('font', '').strip().strip('"')
+        self._font = QFont(family) if family else QFont('monospace')
+        self._font.setPixelSize(9)
 
     # ---------------------------------------------------------- geometry
     def _scale(self):
@@ -142,11 +144,14 @@ class SkinnedPlaylistWindow(QWidget):
 
     @staticmethod
     def _parse_pledit(text):
+        # PLEDIT.TXT is INI-like: colors are #RRGGBB (or bare RRGGBB) and Font is
+        # a face name, so capture every key=value pair (section headers and
+        # comments don't match); _color / the font loader validate their own.
         out = {}
         for line in text.splitlines():
-            m = re.match(r'\s*(\w+)\s*=\s*(#?[0-9A-Fa-f]{6})', line)
+            m = re.match(r'\s*(\w+)\s*=\s*(.+?)\s*$', line)
             if m:
-                out[m.group(1).lower()] = m.group(2)
+                out[m.group(1).lower()] = m.group(2).strip()
         return out
 
     # ------------------------------------------------------------ helpers
