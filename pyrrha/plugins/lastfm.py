@@ -16,6 +16,7 @@ Network calls run on Pyrrha's worker thread.
 """
 
 import logging
+import time
 from enum import Enum
 
 from PySide6.QtCore import QUrl, Signal
@@ -47,6 +48,10 @@ class LastfmPlugin(PyrrhaPlugin):
         self.network = None
         self._really_enabled = False
         self._handlers = []
+        # Radio scrobbling state: the currently-playing ICY track and when it
+        # started, so the previous track can be scrobbled when the title flips.
+        self._radio_key = None
+        self._radio_start = None
         self.preferences_dialog = LastFmAuth(pylast, self.settings, self.window)
         self.preferences_dialog.lastfm_authorized.connect(self._on_authorized)
         self.prepare_complete()
@@ -72,6 +77,9 @@ class LastfmPlugin(PyrrhaPlugin):
         pairs = [
             (self.window.song_ended, self._on_song_ended),
             (self.window.song_changed, self._on_song_changed),
+            # Radio has no per-track song_changed; its ICY now-playing arrives
+            # as metadata_changed, so scrobble radio from there instead.
+            (self.window.metadata_changed, self._on_metadata_changed),
         ]
         for signal, slot in pairs:
             signal.connect(slot)
@@ -96,6 +104,11 @@ class LastfmPlugin(PyrrhaPlugin):
         song = song or self.window.current_song
         if song is None or self.network is None:
             return
+        if getattr(self.window, 'is_radio', False):
+            # A new station started; drop any pending radio track. now-playing
+            # for radio is driven by ICY metadata, not the station row.
+            self._radio_key = self._radio_start = None
+            return
 
         def err(e):
             logging.error('Failed to update Last.fm now playing. Error: {}'.format(e))
@@ -108,6 +121,10 @@ class LastfmPlugin(PyrrhaPlugin):
 
     def _on_song_ended(self, song=None):
         if song is None or self.network is None:
+            return
+        if getattr(self.window, 'is_radio', False):
+            # Leaving a station: scrobble whatever was playing on it.
+            self._scrobble_radio_pending()
             return
 
         def err(e):
@@ -123,6 +140,53 @@ class LastfmPlugin(PyrrhaPlugin):
             args = (song.artist, song.title, int(song.start_time), song.album,
                     None, None, int(duration))
             self.worker.send(self.network.scrobble, args, ok, err)
+
+    def _on_metadata_changed(self, song=None):
+        """Radio now-playing/scrobbling. Fires on every metadata_changed, but
+        only acts when the current radio station's ICY title actually changes:
+        scrobble the previous track, then mark the new one as now-playing."""
+        if self.network is None or not getattr(self.window, 'is_radio', False):
+            return
+        if not self.window.settings['scrobble-radio']:
+            return
+        song = song or self.window.current_song
+        if song is None or song is not self.window.current_song:
+            return
+        key = (song.artist, song.title)
+        if key == self._radio_key:
+            return                          # same track; nothing to do
+        self._scrobble_radio_pending()      # scrobble the outgoing track
+        self._radio_key = key
+        self._radio_start = time.time()
+
+        def err(e):
+            logging.error('Failed to update Last.fm now playing. Error: {}'.format(e))
+
+        self.worker.send(self.network.update_now_playing,
+                         (song.artist, song.title, song.album), lambda *a: None, err)
+
+    def _scrobble_radio_pending(self):
+        """Scrobble the pending radio track if it played long enough, then clear
+        it. Stream tracks have no known length, so we use elapsed wall-clock
+        against Last.fm's 30s floor."""
+        key, start = self._radio_key, self._radio_start
+        self._radio_key = self._radio_start = None
+        if (self.network is None or not key or not start
+                or not self.window.settings['scrobble-radio']):
+            return
+        artist, title = key
+        elapsed = time.time() - start
+        if not artist or not title or elapsed <= 30:
+            return
+
+        def err(e):
+            logging.error('Failed to scrobble to Last.fm. Error: {}'.format(e))
+
+        def ok(*ignore):
+            logging.info('Scrobbled radio track {} by {} to Last.fm'.format(title, artist))
+
+        self.worker.send(self.network.scrobble,
+                         (artist, title, int(start)), ok, err)
 
 
 class AuthState(Enum):
