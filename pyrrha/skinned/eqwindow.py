@@ -35,6 +35,7 @@ PREAMP_X = 21
 BAND_X0, BAND_DX = 78, 18   # band columns: 78, 96, ... 240 (spread out when wider)
 GRAPH = QRect(86, 17, 113, 19)
 ON_BTN = QRect(14, 18, 25, 12)
+AUTO_BTN = QRect(39, 18, 34, 12)       # to the right of ON; sprites at y=119
 PRESETS_BTN = QRect(217, 18, 44, 12)   # opens the preset menu; sprite at (224,164)
 MIN_BTN = QRect(254, 3, 9, 9)     # windowshade: collapse to the title bar
 CLOSE_BTN = QRect(264, 3, 9, 9)   # close (hide) the panel
@@ -72,9 +73,47 @@ PRESETS = [
     ('Loudness',          [7, 5, 0, 0, -3, 0, -1, -6, 6, 1]),
 ]
 
+PRESETS_BY_NAME = {name: values for name, values in PRESETS}
+
+# The "AUTO" button maps free-text metadata (Pandora gives us no genre field) to
+# one of the presets above. Pandora station names are the strongest signal —
+# genre stations are literally named for the genre — with the song's
+# title/album/artist as a weaker fallback. Substrings are matched in order, so
+# list the more specific genres first ("classical"/"hip-hop" before the broad
+# "rock"/"pop", which would otherwise swallow "classic rock" etc.).
+GENRE_KEYWORDS = [
+    ('classical', 'Classical'), ('symphon', 'Classical'), ('orchestr', 'Classical'),
+    ('concerto', 'Classical'), ('baroque', 'Classical'), ('opera', 'Classical'),
+    ('chamber', 'Classical'),
+    ('hip-hop', 'Hip-Hop'), ('hip hop', 'Hip-Hop'), ('hiphop', 'Hip-Hop'),
+    ('rap', 'Hip-Hop'), ('trap', 'Hip-Hop'), ('r&b', 'Hip-Hop'), ('rnb', 'Hip-Hop'),
+    ('urban', 'Hip-Hop'),
+    ('electronic', 'Electronic'), ('synth', 'Electronic'), ('ambient', 'Electronic'),
+    ('downtempo', 'Electronic'), ('chill', 'Electronic'), ('idm', 'Electronic'),
+    ('dance', 'Dance'), ('edm', 'Dance'), ('house', 'Dance'), ('techno', 'Dance'),
+    ('trance', 'Dance'), ('disco', 'Dance'), ('club', 'Dance'),
+    ('jazz', 'Jazz'), ('swing', 'Jazz'), ('bebop', 'Jazz'), ('blues', 'Jazz'),
+    ('dubstep', 'Bass Boost'), ('reggae', 'Bass Boost'), ('bass', 'Bass Boost'),
+    ('acoustic', 'Vocal'), ('singer-songwriter', 'Vocal'), ('folk', 'Vocal'),
+    ('vocal', 'Vocal'), ('a cappella', 'Vocal'), ('acappella', 'Vocal'),
+    ('country', 'Vocal'),
+    ('metal', 'Rock'), ('rock', 'Rock'), ('punk', 'Rock'), ('grunge', 'Rock'),
+    ('alternative', 'Rock'), ('indie', 'Rock'),
+    ('pop', 'Pop'), ('hits', 'Pop'), ('top 40', 'Pop'), ('charts', 'Pop'),
+]
+
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def _match_genre(text):
+    """Return the preset name a metadata string implies, or None."""
+    t = text.lower()
+    for kw, name in GENRE_KEYWORDS:
+        if kw in t:
+            return name
+    return None
 
 
 # --- Winamp EQ preset files (.eqf / winamp.q1) -----------------------------
@@ -133,6 +172,7 @@ class SkinnedEqWindow(QWidget):
         self.setWindowTitle('Pyrrha EQ')
 
         self._on = True
+        self._auto = bool(controller.settings['eq-auto'])
         self._preamp = 0.0
         self._bands = [float(self.eq.get_property('band%d' % i)) for i in range(BANDS)]
         self._drag = None   # index of slider being dragged (-1 = preamp)
@@ -149,6 +189,10 @@ class SkinnedEqWindow(QWidget):
         # dataChanged is the reliable trigger: art_callback always updates the row
         # (metadata_changed is skipped when the art cache write fails).
         controller.song_changed.connect(lambda *_: self.update())
+        # When AUTO is on, re-pick the genre preset as songs (and their
+        # metadata) arrive; a no-op otherwise.
+        controller.song_changed.connect(lambda *_: self._apply_auto_genre())
+        controller.metadata_changed.connect(lambda *_: self._apply_auto_genre())
         controller.metadata_changed.connect(lambda *_: self.update())
         model = getattr(controller, 'songs_model', None)
         if model is not None and hasattr(model, 'dataChanged'):
@@ -384,9 +428,42 @@ class SkinnedEqWindow(QWidget):
 
     # ---------------------------------------------------- per-station EQ
     def _save_station_eq(self):
+        # AUTO owns the curve while on; its derived genre presets (and any
+        # transient hand-tweaks over them) must not overwrite a station's own
+        # remembered curve.
+        if self._auto:
+            return
         sid = getattr(self.ctl, 'current_station_id', None)
         if sid is not None:
             self.ctl.set_station_eq(sid, self._bands, self._preamp)
+
+    # -------------------------------------------------------- AUTO genre
+    def _pick_genre_preset(self):
+        """Preset band list implied by the current station/song metadata, or
+        None when nothing classifies. The station name is Pandora's clearest
+        genre cue; the track's own text is a weaker fallback."""
+        station = getattr(self.ctl, 'current_station', None)
+        name = _match_genre(getattr(station, 'name', '') or '')
+        if name is None:
+            song = getattr(self.ctl, 'current_song', None)
+            if song is not None:
+                corpus = ' '.join(str(getattr(song, a, '') or '')
+                                  for a in ('title', 'songName', 'album', 'artist'))
+                name = _match_genre(corpus)
+        return PRESETS_BY_NAME.get(name) if name else None
+
+    def _apply_auto_genre(self):
+        """Override the curve with the auto-selected genre preset (Flat when the
+        metadata doesn't classify). No-op unless AUTO is engaged."""
+        if not self._auto:
+            return
+        values = self._pick_genre_preset() or PRESETS_BY_NAME['Flat']
+        bands = [_clamp(float(v), DB_MIN, DB_MAX) for v in values]
+        self._bands = (bands + [0.0] * BANDS)[:BANDS]
+        self._preamp = 0.0
+        self._on = True
+        self._apply()
+        self.update()
 
     def _on_rows_changed(self, top_left, bottom_right, *roles):
         # Repaint if the current song's row changed (e.g. its art just arrived).
@@ -395,6 +472,9 @@ class SkinnedEqWindow(QWidget):
             self.update()
 
     def _on_station_changed(self, station):
+        if self._auto:                   # AUTO drives the curve from metadata
+            self._apply_auto_genre()
+            return
         sid = getattr(station, 'id', None)
         saved = self.ctl.get_station_eq(sid)
         if saved:
@@ -452,6 +532,11 @@ class SkinnedEqWindow(QWidget):
         sx, sy = (69, 119) if self._on else (10, 119)
         p.drawImage(ON_BTN.x(), ON_BTN.y(),
                     self.skin.sprite('eqmain.bmp', sx, sy, ON_BTN.width(), ON_BTN.height()))
+
+        # AUTO button (auto-select a genre preset from the track's metadata).
+        ax, ay = (94, 119) if self._auto else (35, 119)
+        p.drawImage(AUTO_BTN.x(), AUTO_BTN.y(),
+                    self.skin.sprite('eqmain.bmp', ax, ay, AUTO_BTN.width(), AUTO_BTN.height()))
 
         # Presets button (a sprite in most skins; some also bake it into the bg).
         p.drawImage(PRESETS_BTN.x(), PRESETS_BTN.y(),
@@ -572,6 +657,13 @@ class SkinnedEqWindow(QWidget):
             self._on = not self._on
             self._apply()
             self._save_station_eq()
+            self.update()
+            return
+        if AUTO_BTN.contains(pos):
+            self._auto = not self._auto
+            self.ctl.settings['eq-auto'] = self._auto
+            if self._auto:
+                self._apply_auto_genre()     # classify the current track now
             self.update()
             return
         if PRESETS_BTN.contains(pos):
