@@ -534,6 +534,7 @@ class SkinnedPlaylistWindow(QWidget):
                 a = m.addAction(_('Get More Songs'), c.fetch_more_songs)
                 a.setEnabled(getattr(c, 'current_station', None) is not None)
                 m.addSeparator()
+                m.addAction(_('Internet Radio…'), c.show_radio)
                 m.addAction(_('Switch to Local Playback'), c.switch_to_local)
         elif btn == 'rem':
             if static:
