@@ -288,11 +288,13 @@ class PreferencesDialog(QDialog):
         self.skin_mode_combo.addItem(_('WinAMP 2.x (Classic)'), 'classic')
         self.skin_mode_combo.addItem(_('Pyrrha (Modern)'), 'modern')
         self.sort_stations_check = QCheckBox(_('Sort stations alphabetically'))
+        self.scrobble_radio_check = QCheckBox(_('Scrobble internet radio to Last.fm'))
 
         form = QFormLayout()
         form.addRow(_('Start in:'), self.startup_view_combo)
         form.addRow(_('Skinned mode:'), self.skin_mode_combo)
         form.addRow('', self.sort_stations_check)
+        form.addRow('', self.scrobble_radio_check)
         return self._page(form)
 
     # -- visualizer page ---------------------------------------------------
@@ -456,6 +458,7 @@ class PreferencesDialog(QDialog):
         if self._window is not None and hasattr(self._window, 'get_skin_mode'):
             self._select_data(self.skin_mode_combo, self._window.get_skin_mode())
         self.sort_stations_check.setChecked(self._settings['sort-stations'])
+        self.scrobble_radio_check.setChecked(self._settings['scrobble-radio'])
 
         # Visualizer
         self._select_data(self.vis_mode_combo, self._settings['vis-mode'])
@@ -529,6 +532,7 @@ class PreferencesDialog(QDialog):
         # Interface
         self._set_if_changed('skinned-view', self.startup_view_combo.currentData())
         self._set_if_changed('sort-stations', self.sort_stations_check.isChecked())
+        self._set_if_changed('scrobble-radio', self.scrobble_radio_check.isChecked())
         # Visualizer (a live window picks these up via settings.changed)
         self._set_if_changed('vis-mode', self.vis_mode_combo.currentData())
         self._set_if_changed('vis-preset', self.vis_preset_combo.currentData())

@@ -113,11 +113,15 @@ class RadioDialog(QDialog):
         self.fav_table = self._make_table([_('Station'), _('Genre')])
         self.fav_table.doubleClicked.connect(lambda *_: self.play_favorite())
 
+        self.restore_button = QPushButton(_('Restore Defaults'))
+        self.restore_button.setToolTip(_('Add the built-in default stations'))
+        self.restore_button.clicked.connect(self.restore_defaults)
         self.remove_button = QPushButton(_('Remove'))
         self.remove_button.clicked.connect(self.remove_favorite)
         self.fav_play_button = QPushButton(_('Play'))
         self.fav_play_button.clicked.connect(self.play_favorite)
         button_row = QHBoxLayout()
+        button_row.addWidget(self.restore_button)
         button_row.addStretch(1)
         button_row.addWidget(self.remove_button)
         button_row.addWidget(self.fav_play_button)
@@ -338,3 +342,7 @@ class RadioDialog(QDialog):
         if station is not None:
             self.window.remove_radio_favorite(station)
             self.refresh_favorites()
+
+    def restore_defaults(self):
+        radio.restore_defaults()
+        self.refresh_favorites()

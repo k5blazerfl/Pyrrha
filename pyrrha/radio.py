@@ -156,6 +156,44 @@ class RadioStation:
         return '<RadioStation "{}">'.format(self.name)
 
 
+# -- default stations ------------------------------------------------------
+
+# A small curated set seeded into the favourites on first run so the feature
+# isn't empty out of the box. SomaFM's listener-supported streams are stable,
+# publicly streamable direct MP3 URLs (no playlist to unwrap).
+_DEFAULT_STATIONS = (
+    # (name, stream URL, genre tags, homepage)
+    ('SomaFM: Groove Salad', 'https://ice1.somafm.com/groovesalad-128-mp3',
+     'ambient,downtempo', 'https://somafm.com/groovesalad/'),
+    ('SomaFM: Drone Zone', 'https://ice1.somafm.com/dronezone-128-mp3',
+     'ambient,space', 'https://somafm.com/dronezone/'),
+    ('SomaFM: Indie Pop Rocks!', 'https://ice1.somafm.com/indiepop-128-mp3',
+     'indie,pop', 'https://somafm.com/indiepop/'),
+    ('SomaFM: Lush', 'https://ice1.somafm.com/lush-128-mp3',
+     'chillout,vocal', 'https://somafm.com/lush/'),
+    ('SomaFM: Secret Agent', 'https://ice1.somafm.com/secretagent-128-mp3',
+     'lounge,downtempo', 'https://somafm.com/secretagent/'),
+    ('SomaFM: DEF CON Radio', 'https://ice1.somafm.com/defcon-128-mp3',
+     'electronic', 'https://somafm.com/defcon/'),
+)
+
+
+def default_stations():
+    """Fresh :class:`RadioStation` objects for the built-in default stations."""
+    return [RadioStation(name, url, tags=tags, bitrate=128, homepage=homepage)
+            for (name, url, tags, homepage) in _DEFAULT_STATIONS]
+
+
+def restore_defaults():
+    """Add any missing built-in default stations to the favourites (keeping the
+    user's own and their order), persist, and return the resulting list."""
+    favorites = load_favorites()
+    have = {s.audioUrl for s in favorites}
+    favorites.extend(s for s in default_stations() if s.audioUrl not in have)
+    save_favorites(favorites)
+    return favorites
+
+
 # -- favourites persistence ------------------------------------------------
 
 def _favorites_file():
@@ -165,13 +203,16 @@ def _favorites_file():
 
 
 def load_favorites():
-    """Return the saved favourite stations as :class:`RadioStation` objects
-    (empty list if none are saved or the file is unreadable)."""
+    """Return the saved favourite stations as :class:`RadioStation` objects.
+    On first run (no favourites file yet) the built-in defaults are seeded and
+    returned; a file that exists but is empty stays empty (the user cleared it)."""
     try:
         with open(_favorites_file(), encoding='utf-8') as f:
             data = json.load(f)
     except FileNotFoundError:
-        return []
+        seeded = default_stations()
+        save_favorites(seeded)
+        return seeded
     except (OSError, ValueError) as e:
         logging.warning('Could not read radio favourites: %s', e)
         return []

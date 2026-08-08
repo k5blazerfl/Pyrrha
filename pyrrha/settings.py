@@ -64,6 +64,10 @@ _ROOT_DEFAULTS = {
     # station/song metadata as tracks change. Opt-in (off preserves the
     # manual + per-station-memory behavior).
     'eq-auto': (False, bool),
+    # Scrobble internet-radio tracks to Last.fm as ICY now-playing changes.
+    # On by default (matches how a scrobbler is expected to behave); off keeps
+    # live radio out of your Last.fm history.
+    'scrobble-radio': (True, bool),
 }
 
 # Plugin child schema. Two flavours, matching the old .plugin / .plugin-enabled
