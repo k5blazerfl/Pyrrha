@@ -354,7 +354,12 @@ class SkinnedPlaylistWindow(QWidget):
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._play_focus()
         elif key in (Qt.Key_Delete, Qt.Key_Backspace):
-            self._remove_selection()
+            # Local: delete the rows. Pandora: the queue is read-only, so Del
+            # instead marks the selected upcoming songs to be skipped.
+            if getattr(self.ctl, 'local_mode', False):
+                self._remove_selection()
+            else:
+                self._skip_selected_songs()
         else:
             return False
         return True
@@ -431,6 +436,17 @@ class SkinnedPlaylistWindow(QWidget):
         rows = sorted(self._selection)
         if rows and hasattr(self.ctl, 'set_songs_skip'):
             self.ctl.set_songs_skip(rows, value)
+            self.update()
+
+    def _skip_selected_songs(self):
+        """Pandora: Del marks the selected upcoming songs to be skipped when
+        advancing. The currently-playing song can't be skipped mid-stream, and
+        songs already behind the playhead won't play again, so both are excluded
+        — only rows ahead of the current one are affected."""
+        cur = self.ctl.current_song_index
+        rows = sorted(i for i in self._selection if cur is None or i > cur)
+        if rows and hasattr(self.ctl, 'set_songs_skip'):
+            self.ctl.set_songs_skip(rows, True)
             self.update()
 
     def _dim(self, c):
