@@ -88,6 +88,10 @@ SPECTRUM_BANDS = 256
 SPECTRUM_THRESHOLD = -80
 _SPECTRUM_RE = re.compile(r'magnitude=\(float\)\{([^}]*)\}')
 
+# When jumping directly to a later Pandora song, a current song that played
+# less than this many seconds is discarded rather than kept as history.
+JUMP_TRIM_SECONDS = 45
+
 
 def parse_proxy(proxy):
     """``_parse_proxy`` from urllib, copied from Pithos' util so we never pull
@@ -904,12 +908,28 @@ class PyrrhaWindow(QMainWindow):
         if self.current_song_index is not None:
             return self.songs_model.song_at(self.current_song_index)
 
-    def start_song(self, song_index):
+    def start_song(self, song_index, jump=False):
         if self.local_mode:
             # Static playlist: stop at the ends instead of fetching more.
             if not (0 <= song_index < len(self.songs_model)):
                 return self.stop()
         else:
+            # A direct user jump to a later song discards what it leaps past:
+            # the queued songs between the current one and the target, plus the
+            # current song itself if it barely played (< JUMP_TRIM_SECONDS).
+            # Songs listened to for longer stay as history. Done before the
+            # pre-fetch check so the remaining-count math sees the trimmed queue.
+            if (jump and self.current_song_index is not None
+                    and song_index > self.current_song_index):
+                cur = self.current_song_index
+                pos = self.query_position() or 0
+                drop_current = pos < JUMP_TRIM_SECONDS * Gst.SECOND
+                lo = cur if drop_current else cur + 1
+                for r in range(song_index - 1, lo - 1, -1):
+                    self.songs_model.remove_row(r)
+                song_index -= (song_index - lo)
+                self.current_song_index = None if drop_current else cur
+                self._reindex_songs()
             songs_remaining = len(self.songs_model) - song_index
             if songs_remaining <= 0:
                 return self.get_playlist(start=True)
@@ -1986,7 +2006,7 @@ class PyrrhaWindow(QMainWindow):
         # playlists are static, so any track is playable.
         playable = self.local_mode or song.index > self.current_song_index
         if playable:
-            self.start_song(song.index)
+            self.start_song(song.index, jump=True)
         return playable
 
     # --------------------------------------------------------------- ratings
