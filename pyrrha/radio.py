@@ -37,6 +37,67 @@ from .pandora import RATE_NONE
 # excluded: that's HLS, which GStreamer's playbin plays directly.
 _PLAYLIST_EXTS = ('.pls', '.m3u', '.asx', '.xspf')
 
+# ICY StreamTitle parsing. Station promos usually carry a domain or a URL; that
+# is the most reliable signal, backed up by the station's own name appearing in
+# a segment.
+_DOMAIN_RE = re.compile(
+    r'\b[\w-]+\.(?:com|net|org|fm|radio|live|io|co|tv|stream|app|de|uk|us|ca|nl|ru|fr|es)\b',
+    re.IGNORECASE)
+
+
+def _looks_like_promo(segment, station_name):
+    low = segment.lower()
+    if 'http://' in low or 'https://' in low or 'www.' in low:
+        return True
+    if _DOMAIN_RE.search(segment):
+        return True
+    # The station name (or a distinctive multi-word prefix of it) showing up in
+    # a segment is a station ident, not a track.
+    name = (station_name or '').strip().lower()
+    if len(name) >= 6 and name in low:
+        return True
+    words = [w for w in re.split(r'\W+', name) if w]
+    if len(words) >= 2 and ' '.join(words[:2]) in low:
+        return True
+    return False
+
+
+def _strip_promo_clause(segment):
+    """Cut a trailing ``" on <host-with-domain>"`` promo (matching the *last*
+    ``on`` so real titles like "Dancing on the Ceiling" survive)."""
+    m = re.match(r'^(.*)\s+on\s+(\S.*)$', segment, re.IGNORECASE)
+    if m and _DOMAIN_RE.search(m.group(2)):
+        return m.group(1).strip()
+    return segment
+
+
+def parse_stream_title(streamtitle, station_name=''):
+    """Parse an ICY ``StreamTitle`` into ``(artist, title)`` (artist may be None
+    when unknown), or None if there's nothing usable. Strips trailing/leading
+    station-promo segments and understands ``"Title by Artist"`` in addition to
+    ``"Artist - Title"``."""
+    streamtitle = (streamtitle or '').strip()
+    if not streamtitle:
+        return None
+    segments = [s.strip() for s in re.split(r'\s+-\s+', streamtitle) if s.strip()]
+    if not segments:
+        return None
+    # Drop promo segments from the ends, always keeping at least one.
+    while len(segments) > 1 and _looks_like_promo(segments[-1], station_name):
+        segments.pop()
+    while len(segments) > 1 and _looks_like_promo(segments[0], station_name):
+        segments.pop(0)
+    segments[-1] = _strip_promo_clause(segments[-1]) or segments[-1]
+
+    if len(segments) == 1:
+        seg = segments[0]
+        # "Title by Artist" — only when there's no dash structure to rely on.
+        m = re.match(r'^(.+?)\s+by\s+(.+)$', seg, re.IGNORECASE)
+        if m and m.group(1).strip() and m.group(2).strip():
+            return m.group(2).strip(), m.group(1).strip()   # (artist, title)
+        return None, seg                                    # title only
+    return segments[0], ' - '.join(segments[1:])            # (artist, title)
+
 
 class RadioStation:
     """An Icecast/Shoutcast stream dressed up as a Pandora ``Song`` for the
@@ -95,19 +156,15 @@ class RadioStation:
 
     # -- ICY now-playing ---------------------------------------------------
     def set_stream_title(self, streamtitle):
-        """Apply an ICY ``StreamTitle`` (conventionally ``"Artist - Title"``).
-        Returns True if the displayed artist/title changed."""
-        streamtitle = (streamtitle or '').strip()
-        if not streamtitle:
+        """Apply an ICY ``StreamTitle``. Handles the common ``"Artist - Title"``
+        as well as ``"Title by Artist"``, and strips trailing station-promo
+        segments (``"… - Station on example.com"``). Returns True if the
+        displayed artist/title changed."""
+        parsed = parse_stream_title(streamtitle, self.name)
+        if parsed is None:
             return False
-        artist, sep, title = streamtitle.partition(' - ')
-        if sep:
-            new_artist, new_title = artist.strip(), title.strip()
-        else:
-            # No separator: many stations send just a title (or the station
-            # name). Keep the station name as the artist so scrobbles/MPRIS
-            # still have both fields populated.
-            new_artist, new_title = self.name, streamtitle
+        new_artist, new_title = parsed
+        new_artist = new_artist or self.name   # keep both fields populated
         if (new_artist, new_title) == (self.artist, self.title):
             return False
         self.artist, self.title = new_artist, new_title
