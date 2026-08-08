@@ -282,7 +282,7 @@ class PreferencesDialog(QDialog):
     # -- interface page ----------------------------------------------------
     def _build_interface_page(self):
         self.startup_view_combo = QComboBox()
-        self.startup_view_combo.addItem(_('Standard (Pithos)'), False)
+        self.startup_view_combo.addItem(_('Pithos Classic'), False)
         self.startup_view_combo.addItem(_('Skinned (Winamp)'), True)
         self.skin_mode_combo = QComboBox()
         self.skin_mode_combo.addItem(_('WinAMP 2.x (Classic)'), 'classic')
