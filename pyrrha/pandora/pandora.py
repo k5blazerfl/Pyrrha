@@ -573,6 +573,54 @@ class Song:
     def bookmark_artist(self):
         self.pandora.json_call('bookmark.addArtistBookmark', {'trackToken': self.trackToken})
 
+    def to_state(self):
+        """A JSON-serialisable snapshot of the fields needed to rebuild this song
+        without a network round-trip (used to persist the queue across restarts).
+        The audio URLs live in ``audioUrlMap`` and expire with ``playlist_time``;
+        :meth:`is_still_valid` guards that on restore."""
+        return {
+            'trackToken': self.trackToken, 'songName': self.songName,
+            'title': self.title, 'artist': self.artist, 'album': self.album,
+            'songDetailURL': self.songDetailURL, 'songExplorerUrl': self.songExplorerUrl,
+            'artRadio': self.artRadio, 'trackLength': self.trackLength,
+            'trackGain': self.trackGain, 'audioUrlMap': self.audioUrlMap,
+            'stationId': self.stationId, 'rating': self.rating,
+            'feedbackId': self.feedbackId, 'tired': self.tired,
+            'playlist_time': self.playlist_time,
+        }
+
+    @classmethod
+    def from_state(cls, pandora, state):
+        """Rebuild a :class:`Song` from :meth:`to_state` output, bypassing
+        ``__init__`` (and its title-resolving network call)."""
+        self = cls.__new__(cls)
+        self.pandora = pandora
+        self.playlist_time = state['playlist_time']
+        self.is_ad = None
+        self.tired = state.get('tired', False)
+        self.message = ''
+        self.duration = None
+        self.position = None
+        self.bitrate = None
+        self.start_time = None
+        self.finished = False
+        self.feedbackId = state.get('feedbackId')
+        self.artUrl = None
+        self.album = state['album']
+        self.artist = state['artist']
+        self.trackToken = state['trackToken']
+        self.rating = state.get('rating', RATE_NONE)
+        self.stationId = state['stationId']
+        self.songName = state['songName']
+        self.songDetailURL = state.get('songDetailURL', '')
+        self.songExplorerUrl = state.get('songExplorerUrl', '')
+        self.artRadio = state.get('artRadio')
+        self.trackLength = state['trackLength']
+        self.trackGain = state.get('trackGain', 0.0)
+        self.audioUrlMap = state['audioUrlMap']
+        self.title = state.get('title') or self.songName
+        return self
+
     @property
     def rating_str(self):
         return self.rating
