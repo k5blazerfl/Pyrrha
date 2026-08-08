@@ -854,8 +854,16 @@ class SkinnedPlaylistWindow(QWidget):
         if sb is not None:
             thumb, track_top, track_h = sb
             if pos.x() >= self._lw() - FRAME_R and track_top <= pos.y() < track_top + track_h + thumb.height():
+                # Stop auto-follow immediately so a repaint mid-interaction (the
+                # marquee/now-playing timers fire often) can't snap the thumb
+                # back to the now-playing row out from under the cursor.
+                self._follow = False
                 if thumb.contains(pos):
                     self._sb_drag = pos.y() - thumb.y()
+                    # Grab the mouse for the drag: under the classic overlay's
+                    # masked, translucent top-level the implicit press-grab may
+                    # not deliver the move events, so grab explicitly.
+                    self.grabMouse()
                 elif pos.y() < thumb.y():
                     self._scroll_by(-self._capacity())
                 else:
@@ -1031,6 +1039,8 @@ class SkinnedPlaylistWindow(QWidget):
             if self._deferred_select is not None:
                 self._select(self._deferred_select)
             self._reset_drag()
+        if self._sb_drag is not None:
+            self.releaseMouse()          # end the scrollbar-drag mouse grab
         self._sb_drag = None
         self._resizing = False
 

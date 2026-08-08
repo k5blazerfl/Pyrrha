@@ -1197,7 +1197,7 @@ class SkinnedWindow(QWidget):
         if cur_mode != 'modern':
             mode_menu.addAction(_('Pyrrha'), lambda: shell.set_mode('modern'))
         mode_menu.addSeparator()
-        mode_menu.addAction(_('Pithos'), c.show_standard_view)
+        mode_menu.addAction(_('Pithos Classic'), c.show_standard_view)
         menu.addSeparator()
         menu.addAction(_('Quit'), c.quit)
         menu.exec(global_pos)
