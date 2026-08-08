@@ -1132,11 +1132,11 @@ class SkinnedWindow(QWidget):
             repeat.setCheckable(True)
             repeat.setChecked(bool(getattr(c, 'repeat', False)))
         # Sleep timer (Winamp): stop after N minutes or at the end of the track.
-        # Disabled in Pandora mode — the stream has no fixed end to sleep to.
-        if hasattr(c, 'sleep_status'):
+        # Local playback only — the endless Pandora stream has no fixed end to
+        # sleep to, so it's omitted in Pandora mode.
+        if c.local_mode and hasattr(c, 'sleep_status'):
             mode, remaining, mins_set = c.sleep_status()
             sleep_menu = menu.addMenu(_('Sleep'))
-            sleep_menu.setEnabled(c.local_mode)
             if mode == 'timer' and remaining is not None:
                 sleep_menu.setTitle(_('Sleep — {}:{:02d} left').format(
                     remaining // 60, remaining % 60))
