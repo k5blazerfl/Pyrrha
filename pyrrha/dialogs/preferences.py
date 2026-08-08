@@ -311,6 +311,8 @@ class PreferencesDialog(QDialog):
         for label, f in vis._FALLOFF:
             self.vis_falloff_combo.addItem(_(label), f)
         self.vis_peak_check = QCheckBox(_('Peak hold'))
+        self.vis_open_btn = QPushButton(_('Open Visualizer Window'))
+        self.vis_open_btn.clicked.connect(self._open_visualizer)
 
         form = QFormLayout()
         form.addRow(_('Default mode:'), self.vis_mode_combo)
@@ -318,11 +320,20 @@ class PreferencesDialog(QDialog):
         form.addRow(_('Sensitivity:'), self.vis_sens_combo)
         form.addRow(_('Falloff:'), self.vis_falloff_combo)
         form.addRow('', self.vis_peak_check)
+        form.addRow('', self.vis_open_btn)
         hint = QLabel(_('These also apply live to an open visualizer window.'))
         hint.setWordWrap(True)
         hint.setStyleSheet('color: palette(mid);')
         form.addRow('', hint)
         return self._page(form)
+
+    def _open_visualizer(self):
+        """Open the large visualizer window from the Preferences button. Persist
+        the current visualizer settings first (without touching credentials) so
+        the window reflects the chosen mode/preset."""
+        self._write_plain_settings()
+        if self._window is not None and hasattr(self._window, 'open_visualizer'):
+            self._window.open_visualizer()
 
     # -- shortcuts page (read-only reference) ------------------------------
     def _build_shortcuts_page(self):
