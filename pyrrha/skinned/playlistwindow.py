@@ -359,7 +359,7 @@ class SkinnedPlaylistWindow(QWidget):
             if getattr(self.ctl, 'local_mode', False):
                 self._remove_selection()
             else:
-                self._skip_selected_songs()
+                self._toggle_skip_selected()
         else:
             return False
         return True
@@ -453,6 +453,24 @@ class SkinnedPlaylistWindow(QWidget):
             self.ctl.set_songs_skip(rows, value)
             self.update()
 
+    def _toggle_skip_selected(self):
+        """Flip the skip mark on the eligible selected upcoming songs. With a
+        key there's no menu to disambiguate a mixed selection, so any still-
+        queued song means 'skip all'; only an all-skipped selection un-skips."""
+        skipped, unskipped = self._skippable_skip_split()
+        if skipped or unskipped:
+            self._skip_selected_songs(not unskipped)
+
+    def _skippable_skip_split(self):
+        """Split the skippable selection into (skipped, unskipped) row lists by
+        their current skip mark — used to decide whether Rem can toggle outright
+        or must offer both choices."""
+        songs = self._rows()
+        skipped, unskipped = [], []
+        for i in self._skippable_selection():
+            (skipped if getattr(songs[i], 'skip', False) else unskipped).append(i)
+        return skipped, unskipped
+
     def _dim(self, c):
         """Blend a text colour halfway to the background — a faded 'skipped' look
         that works on both light and dark skins."""
@@ -489,6 +507,16 @@ class SkinnedPlaylistWindow(QWidget):
         c = self.ctl
         local = getattr(c, 'local_mode', False)
         have_sel = bool(self._selection)
+        # Pandora Rem acts as a plain skip toggle: with a uniform selection
+        # (all skipped or all not) one click flips it, no menu. Only a mixed
+        # selection — some already skipped, some still queued — needs the menu
+        # to disambiguate which way to go.
+        if btn == 'rem' and not local:
+            skipped, unskipped = self._skippable_skip_split()
+            if not (skipped and unskipped):
+                if skipped or unskipped:
+                    self._skip_selected_songs(not skipped)
+                return
         m = QMenu(self)
         if btn == 'add':
             if local:
@@ -510,14 +538,11 @@ class SkinnedPlaylistWindow(QWidget):
                 a = m.addAction(_('Remove All'), self._clear_playlist)
                 a.setEnabled(len(self._rows()) > 0)
             else:
-                # The Pandora queue is read-only, so Rem preemptively skips the
-                # selected upcoming songs instead (never the playing one) — the
-                # same action as the Del key.
-                skippable = bool(self._skippable_selection())
-                a = m.addAction(_('Skip Selected'), lambda: self._skip_selected_songs(True))
-                a.setEnabled(skippable)
-                a = m.addAction(_('Don’t Skip Selected'), lambda: self._skip_selected_songs(False))
-                a.setEnabled(skippable)
+                # Only reached for a mixed selection (some songs already marked
+                # to skip, some still queued); a uniform selection is toggled
+                # outright above without a menu.
+                m.addAction(_('Skip Selected'), lambda: self._skip_selected_songs(True))
+                m.addAction(_('Don’t Skip Selected'), lambda: self._skip_selected_songs(False))
         elif btn == 'sel':
             m.addAction(_('Select All'), self._select_all)
             m.addAction(_('Select None'), self._select_none)

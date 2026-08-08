@@ -1056,11 +1056,19 @@ class PyrrhaWindow(QMainWindow):
                     break
                 idx = self._next_local_index(+1, from_idx=idx)
             return self.stop() if idx is None else self.start_song(idx)
-        # Pandora queue: jump to the next song not marked to skip. The queue
-        # buffer is kept full via _ensure_queue_buffer (song_changed/songs_added).
+        # Pandora queue: jump to the next song not marked to skip, dropping the
+        # skipped songs from the list as we pass them (the queue buffer is kept
+        # full via _ensure_queue_buffer on song_changed/songs_added).
         idx = self.current_song_index + 1
+        skipped = []
         while idx < n and self._is_skipped(idx):
+            skipped.append(idx)
             idx += 1
+        if skipped:
+            for r in reversed(skipped):        # descending keeps indices valid
+                self.songs_model.remove_row(r)
+            idx -= len(skipped)                # target shifted down by removals
+            self._reindex_songs()
         self.start_song(idx)
 
     def set_songs_skip(self, rows, skip):
