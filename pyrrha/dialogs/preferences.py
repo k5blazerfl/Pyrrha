@@ -49,6 +49,13 @@ _QUALITY_LABELS = [
     (_('High'), 'highQuality'),
 ]
 
+# How many songs to keep queued ahead of the current one (see prequeue-size).
+_PREQUEUE_LABELS = [
+    (_('Off'), 0),
+    (_('4 songs'), 4),
+    (_('8 songs'), 8),
+]
+
 # Proper display names for the plugins (str.title() mangles MPRIS, Last.fm, …).
 _PLUGIN_NAMES = {
     'mpris': 'MPRIS',
@@ -239,8 +246,13 @@ class PreferencesDialog(QDialog):
         for label, value in _QUALITY_LABELS:
             self.quality_combo.addItem(label, value)
 
+        self.prequeue_combo = QComboBox()
+        for label, value in _PREQUEUE_LABELS:
+            self.prequeue_combo.addItem(label, value)
+
         form = QFormLayout()
         form.addRow(_('Streaming quality:'), self.quality_combo)
+        form.addRow(_('Pre-queue songs:'), self.prequeue_combo)
         hint = QLabel(_('The 10-band equalizer and ReplayGain volume '
                         'normalization are in the Plugins section.'))
         hint.setWordWrap(True)
@@ -426,6 +438,7 @@ class PreferencesDialog(QDialog):
         self.control_proxy_pac_entry.setText(self._settings['control-proxy-pac'])
 
         self._select_data(self.quality_combo, self._settings['audio-quality'])
+        self._select_data(self.prequeue_combo, self._settings['prequeue-size'])
 
         # Interface
         self._select_data(self.startup_view_combo, self._settings['skinned-view'])
@@ -501,6 +514,7 @@ class PreferencesDialog(QDialog):
         self._set_if_changed('control-proxy', self.control_proxy_entry.text())
         self._set_if_changed('control-proxy-pac', self.control_proxy_pac_entry.text())
         self._set_if_changed('audio-quality', self.quality_combo.currentData())
+        self._set_if_changed('prequeue-size', self.prequeue_combo.currentData())
         # Interface
         self._set_if_changed('skinned-view', self.startup_view_combo.currentData())
         self._set_if_changed('sort-stations', self.sort_stations_check.isChecked())

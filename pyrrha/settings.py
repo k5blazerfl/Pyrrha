@@ -45,6 +45,9 @@ _ROOT_DEFAULTS = {
     'volume': (0.7, float),
     'balance': (0.0, float),
     'audio-quality': ('highQuality', str),
+    # How many unskipped Pandora songs to keep pre-queued ahead of the current
+    # one (0 = off; only the next batch is fetched as the queue runs out).
+    'prequeue-size': (8, int),
     # Which top-level view the player was last in: True = skinned (Winamp)
     # view, False = standard (native) window. Restored at startup.
     'skinned-view': (False, bool),
@@ -57,6 +60,10 @@ _ROOT_DEFAULTS = {
     'vis-gain': (1.0, float),      # input sensitivity
     'vis-falloff': (0.05, float),  # bar decay per frame
     'vis-peak-hold': (False, bool),
+    # EQ "AUTO" button: auto-select a genre preset from the current
+    # station/song metadata as tracks change. Opt-in (off preserves the
+    # manual + per-station-memory behavior).
+    'eq-auto': (False, bool),
 }
 
 # Plugin child schema. Two flavours, matching the old .plugin / .plugin-enabled

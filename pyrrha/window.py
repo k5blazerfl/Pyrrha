@@ -306,7 +306,7 @@ class PyrrhaWindow(QMainWindow):
     def playing(self):
         return self._buffer_recovery_state is not PseudoGst.PAUSED
 
-    PREQUEUE_TARGET = 8   # unskipped Pandora songs to keep queued ahead of current
+    PREQUEUE_TARGET = 8   # default; overridden by the 'prequeue-size' setting
 
     # -------------------------------------------------------------------- ui
     def init_ui(self):
@@ -1448,7 +1448,10 @@ class PyrrhaWindow(QMainWindow):
         (Pandora), fetching another batch in the background if we're short."""
         if self.local_mode or self.current_station is None:
             return
-        if self._unskipped_ahead() < self.PREQUEUE_TARGET:
+        target = self.settings['prequeue-size']
+        # 0 (Off): don't over-fetch; start_song() still pulls the next batch as
+        # the queue is exhausted, so playback never stalls.
+        if target > 0 and self._unskipped_ahead() < target:
             self.fetch_more_songs()
 
     def _on_songs_added(self, count):
