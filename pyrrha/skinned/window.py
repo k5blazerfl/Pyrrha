@@ -1081,19 +1081,28 @@ class SkinnedWindow(QWidget):
 
     def _show_menu(self, global_pos):
         c = self.ctl
+        radio_mode = getattr(c, 'is_radio', False)
         menu = QMenu(self)
-        # Source toggle: Pandora vs Local Playback. Open Files/Folder are only
-        # offered in local mode; Stations only in Pandora mode.
+        # Source switch: Pandora / Local Playback / Internet Radio. Each mode
+        # offers a route to the other two, plus its own actions (local files,
+        # Pandora stations, or the radio browser).
         if c.local_mode:
             menu.addAction(_('Switch to Pandora'), c.switch_to_pandora)
+            menu.addAction(_('Internet Radio…'), c.show_radio)
             menu.addSeparator()
             menu.addAction(_('Open Files…'), c.open_local_files)
             menu.addAction(_('Open Folder…'), c.open_local_folder)
             menu.addAction(_('Open Playlist…'), c.open_playlist)
             save = menu.addAction(_('Save Playlist…'), c.save_playlist)
             save.setEnabled(len(c.songs_model) > 0)
+        elif radio_mode:
+            menu.addAction(_('Browse Stations…'), c.show_radio)
+            menu.addSeparator()
+            menu.addAction(_('Switch to Pandora'), c.switch_to_pandora)
+            menu.addAction(_('Switch to Local Playback'), c.switch_to_local)
         else:
             menu.addAction(_('Switch to Local Playback'), c.switch_to_local)
+            menu.addAction(_('Internet Radio…'), c.show_radio)
             menu.addSeparator()
             stations = menu.addMenu(_('Stations'))
             self._populate_stations(stations)
@@ -1102,7 +1111,7 @@ class SkinnedWindow(QWidget):
         menu.addSeparator()
         menu.addAction(_('Preferences…'), c.show_preferences)
         menu.addAction(_('About Pyrrha'), c.show_about)
-        if not c.local_mode:
+        if not c.local_mode and not radio_mode:   # ratings are Pandora-only
             menu.addSeparator()
             menu.addAction(_('Love'), lambda: c.love_song())
             menu.addAction(_('Ban'), lambda: c.ban_song())
