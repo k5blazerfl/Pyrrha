@@ -1108,29 +1108,35 @@ class SkinnedWindow(QWidget):
             menu.addAction(_('Ban'), lambda: c.ban_song())
             menu.addAction(_('Tired'), lambda: c.tired_song())
         menu.addSeparator()
-        # Jump to a track by typing (classic Winamp 'J').
-        jump = menu.addAction(_('Jump to File…') + '\tJ',
-                              lambda: self.window().open_jump_to_file())
-        jump.setEnabled(len(c.songs_model) > 0)
-        jump_time = menu.addAction(_('Jump to Time…') + '\tCtrl+J',
-                                   lambda: self.window().open_jump_to_time())
-        jump_time.setEnabled(c.seekable())
-        if hasattr(c, 'info_song'):
-            info = menu.addAction(_('File Info…') + '\tAlt+3', lambda: c.info_song())
-            info.setEnabled(c.current_song is not None)
-        # Playback toggles — Options-menu parity with the sprites/clutterbar.
-        shuffle = menu.addAction(_('Shuffle') + '\tS',
-                                 lambda: (c.toggle_shuffle(), self.update()))
-        shuffle.setCheckable(True)
-        shuffle.setChecked(bool(getattr(c, 'shuffle', False)))
-        repeat = menu.addAction(_('Repeat') + '\tR',
-                                lambda: (c.toggle_repeat(), self.update()))
-        repeat.setCheckable(True)
-        repeat.setChecked(bool(getattr(c, 'repeat', False)))
+        # Jump/File Info/Shuffle/Repeat apply to the static local playlist only
+        # — the Pandora queue can't be rewound, searched by file, tagged, or
+        # reordered — so they're omitted entirely in Pandora mode.
+        if c.local_mode:
+            # Jump to a track by typing (classic Winamp 'J').
+            jump = menu.addAction(_('Jump to File…') + '\tJ',
+                                  lambda: self.window().open_jump_to_file())
+            jump.setEnabled(len(c.songs_model) > 0)
+            jump_time = menu.addAction(_('Jump to Time…') + '\tCtrl+J',
+                                       lambda: self.window().open_jump_to_time())
+            jump_time.setEnabled(c.seekable())
+            if hasattr(c, 'info_song'):
+                info = menu.addAction(_('File Info…') + '\tAlt+3', lambda: c.info_song())
+                info.setEnabled(c.current_song is not None)
+            # Playback toggles — Options-menu parity with the sprites/clutterbar.
+            shuffle = menu.addAction(_('Shuffle') + '\tS',
+                                     lambda: (c.toggle_shuffle(), self.update()))
+            shuffle.setCheckable(True)
+            shuffle.setChecked(bool(getattr(c, 'shuffle', False)))
+            repeat = menu.addAction(_('Repeat') + '\tR',
+                                    lambda: (c.toggle_repeat(), self.update()))
+            repeat.setCheckable(True)
+            repeat.setChecked(bool(getattr(c, 'repeat', False)))
         # Sleep timer (Winamp): stop after N minutes or at the end of the track.
+        # Disabled in Pandora mode — the stream has no fixed end to sleep to.
         if hasattr(c, 'sleep_status'):
             mode, remaining, mins_set = c.sleep_status()
             sleep_menu = menu.addMenu(_('Sleep'))
+            sleep_menu.setEnabled(c.local_mode)
             if mode == 'timer' and remaining is not None:
                 sleep_menu.setTitle(_('Sleep — {}:{:02d} left').format(
                     remaining // 60, remaining % 60))
@@ -1147,23 +1153,8 @@ class SkinnedWindow(QWidget):
             eot = sleep_menu.addAction(_('End of Track'), c.set_sleep_end_of_track)
             eot.setCheckable(True)
             eot.setChecked(mode == 'track')
-        time_menu = menu.addMenu(_('Time'))
-        el = time_menu.addAction(_('Elapsed'), lambda: self._set_time_remaining(False))
-        el.setCheckable(True)
-        el.setChecked(not self._time_remaining)
-        rem = time_menu.addAction(_('Remaining'), lambda: self._set_time_remaining(True))
-        rem.setCheckable(True)
-        rem.setChecked(self._time_remaining)
-        vis_menu = menu.addMenu(_('Visualization'))
-        for vlabel, vmode in ((_('Bars'), VIS_BARS_MODE), (_('Lines'), VIS_LINES),
-                              (_('Dots'), VIS_DOTS), (_('Oscilloscope'), VIS_SCOPE),
-                              (_('Off'), VIS_OFF)):
-            a = vis_menu.addAction(vlabel, lambda *args, m=vmode: self._set_vis_mode(m))
-            a.setCheckable(True)
-            a.setChecked(self._vis_mode == vmode)
-        vis_menu.addSeparator()
-        vis_menu.addAction(_('Open Visualizer Window…'),
-                           lambda: self.window().open_vis_window())
+        # Time display (Elapsed/Remaining) and Visualization mode live in
+        # Preferences now, so they're no longer duplicated here.
         top = menu.addAction(_('Always on Top') + '\tCtrl+A',
                              lambda: self._clutter_action('A', None))
         top.setCheckable(True)
