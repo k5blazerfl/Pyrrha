@@ -354,9 +354,10 @@ class SkinnedPlaylistWindow(QWidget):
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self._play_focus()
         elif key in (Qt.Key_Delete, Qt.Key_Backspace):
-            # Local: delete the rows. Pandora: the queue is read-only, so Del
-            # instead marks the selected upcoming songs to be skipped.
-            if getattr(self.ctl, 'local_mode', False):
+            # Static list (local files / radio favourites): delete the rows.
+            # Pandora: the queue is read-only, so Del instead marks the selected
+            # upcoming songs to be skipped.
+            if getattr(self.ctl, 'static_playlist', False):
                 self._remove_selection()
             else:
                 self._toggle_skip_selected()
@@ -395,11 +396,11 @@ class SkinnedPlaylistWindow(QWidget):
         if self._focus is None:
             return
         idx, cur = self._focus, self.ctl.current_song_index
-        if getattr(self.ctl, 'local_mode', False) or (cur is not None and idx > cur):
+        if getattr(self.ctl, 'static_playlist', False) or (cur is not None and idx > cur):
             self.ctl.start_song(idx, jump=True)
 
     def _remove_selection(self):
-        if not self._selection or not getattr(self.ctl, 'local_mode', False):
+        if not self._selection or not getattr(self.ctl, 'static_playlist', False):
             return
         rows = sorted(self._selection)
         self.ctl.remove_songs(rows)
@@ -410,7 +411,7 @@ class SkinnedPlaylistWindow(QWidget):
         self.update()
 
     def _crop_to_selection(self):
-        if not self._selection or not getattr(self.ctl, 'local_mode', False):
+        if not self._selection or not getattr(self.ctl, 'static_playlist', False):
             return
         keep = self._selection
         drop = [i for i in range(len(self._rows())) if i not in keep]
@@ -506,12 +507,14 @@ class SkinnedPlaylistWindow(QWidget):
     def _show_bottom_menu(self, btn, gpos):
         c = self.ctl
         local = getattr(c, 'local_mode', False)
+        radio = getattr(c, 'is_radio', False)
+        static = getattr(c, 'static_playlist', False)
         have_sel = bool(self._selection)
         # Pandora Rem acts as a plain skip toggle: with a uniform selection
         # (all skipped or all not) one click flips it, no menu. Only a mixed
         # selection — some already skipped, some still queued — needs the menu
-        # to disambiguate which way to go.
-        if btn == 'rem' and not local:
+        # to disambiguate which way to go. Static lists get a real remove menu.
+        if btn == 'rem' and not static:
             skipped, unskipped = self._skippable_skip_split()
             if not (skipped and unskipped):
                 if skipped or unskipped:
@@ -522,21 +525,27 @@ class SkinnedPlaylistWindow(QWidget):
             if local:
                 m.addAction(_('Add Files…'), c.open_local_files)
                 m.addAction(_('Add Folder…'), c.open_local_folder)
+            elif radio:
+                m.addAction(_('Add Stations…'), c.show_radio)
+                m.addSeparator()
+                m.addAction(_('Switch to Pandora'), c.switch_to_pandora)
+                m.addAction(_('Switch to Local Playback'), c.switch_to_local)
             else:
                 a = m.addAction(_('Get More Songs'), c.fetch_more_songs)
                 a.setEnabled(getattr(c, 'current_station', None) is not None)
                 m.addSeparator()
                 m.addAction(_('Switch to Local Playback'), c.switch_to_local)
         elif btn == 'rem':
-            if local:
+            if static:
                 a = m.addAction(_('Remove Selected'), self._remove_selection)
                 a.setEnabled(have_sel)
                 a = m.addAction(_('Crop (keep selected)'), self._crop_to_selection)
                 a.setEnabled(have_sel)
-                a = m.addAction(_('Remove Missing Files'), self._remove_missing)
-                a.setEnabled(len(self._rows()) > 0)
-                a = m.addAction(_('Remove All'), self._clear_playlist)
-                a.setEnabled(len(self._rows()) > 0)
+                if local:
+                    a = m.addAction(_('Remove Missing Files'), self._remove_missing)
+                    a.setEnabled(len(self._rows()) > 0)
+                    a = m.addAction(_('Remove All'), self._clear_playlist)
+                    a.setEnabled(len(self._rows()) > 0)
             else:
                 # Only reached for a mixed selection (some songs already marked
                 # to skip, some still queued); a uniform selection is toggled
@@ -831,8 +840,8 @@ class SkinnedPlaylistWindow(QWidget):
         idx = self._song_index_at(pos.y())
         if idx is not None:
             cur = self.ctl.current_song_index
-            # Local playback can start any track; Pandora can only go forward.
-            if self.ctl.local_mode or (cur is not None and idx > cur):
+            # Static playlists can start any track; Pandora can only go forward.
+            if self.ctl.static_playlist or (cur is not None and idx > cur):
                 self.ctl.start_song(idx, jump=True)
 
     def mousePressEvent(self, event):
@@ -904,8 +913,8 @@ class SkinnedPlaylistWindow(QWidget):
             mods = event.modifiers()
             shift = bool(mods & Qt.ShiftModifier)
             ctrl = bool(mods & Qt.ControlModifier)
-            if getattr(self.ctl, 'local_mode', False) and not shift and not ctrl:
-                # Local mode: prepare a possible drag-to-reorder. Keep an existing
+            if getattr(self.ctl, 'static_playlist', False) and not shift and not ctrl:
+                # Static list: prepare a possible drag-to-reorder. Keep an existing
                 # multi-selection (so it can be dragged); otherwise select this row.
                 self._press_row = idx
                 self._press_pos = QPoint(pos)
@@ -944,6 +953,13 @@ class SkinnedPlaylistWindow(QWidget):
             rem.setEnabled(bool(self._selection))
             rev = menu.addAction(_('Reveal in File Manager'), lambda: self._reveal(song))
             rev.setEnabled(bool(getattr(song, 'path', '')))
+        elif getattr(c, 'is_radio', False):
+            menu.addAction(_('Play'), self._play_focus)
+            rem = menu.addAction(_('Remove Selected'), self._remove_selection)
+            rem.setEnabled(bool(self._selection))
+            if getattr(song, 'songDetailURL', ''):
+                menu.addAction(_('Station Homepage'),
+                               lambda: c.open_url(song.songDetailURL))
         else:
             icon = c.song_icon(song)
             if icon == 'love':

@@ -55,6 +55,8 @@ from .pandora.data import (
 
 from . import __version__
 from . import local
+from . import radio
+from . import radiobrowser
 from .settings import get_settings
 from .appicon import app_icon
 from .keyring import SecretService, is_flatpak
@@ -64,6 +66,7 @@ from .worker import Worker
 from .plugin_loader import load_plugins
 from .dialogs.preferences import PreferencesDialog
 from .dialogs.stations import StationsDialog
+from .dialogs.radio import RadioDialog
 from .dialogs.about import AboutDialog
 
 try:
@@ -91,6 +94,17 @@ _SPECTRUM_RE = re.compile(r'magnitude=\(float\)\{([^}]*)\}')
 # When jumping directly to a later Pandora song, a current song that played
 # less than this many seconds is discarded rather than kept as history.
 JUMP_TRIM_SECONDS = 45
+
+# Playback sources. Pandora is an endless fetched station; Local and Radio are
+# static playlists (of files / of favourite stations). Pandora and Radio both
+# stream over the network (buffering); Local plays immediately. See the
+# ``local_mode`` / ``static_playlist`` / ``streaming`` window properties.
+SOURCE_PANDORA = 'pandora'
+SOURCE_LOCAL = 'local'
+SOURCE_RADIO = 'radio'
+
+# How many times to silently reconnect a dropped radio stream before giving up.
+RADIO_RECONNECT_TRIES = 3
 
 
 def parse_proxy(proxy):
@@ -183,6 +197,7 @@ class PyrrhaWindow(QMainWindow):
         self.prefs_dlg.finished.connect(self.on_prefs_finished)
 
         self.stations_dlg = None
+        self.radio_dlg = None
         # Plugins may register callables here to intercept window close
         # (return True to hide instead of quit); see closeEvent.
         self.close_interceptors = []
@@ -250,6 +265,7 @@ class PyrrhaWindow(QMainWindow):
         bus = self.player.get_bus()
         bus.add_signal_watch()
         bus.connect("message::stream-start", self.on_gst_stream_start)
+        bus.connect("message::tag", self.on_gst_tag)
         bus.connect("message::eos", self.on_gst_eos)
         bus.connect("message::buffering", self.on_gst_buffering)
         bus.connect("message::error", self.on_gst_error)
@@ -263,9 +279,12 @@ class PyrrhaWindow(QMainWindow):
         self.current_song_index = None
         self.current_station = None
         self.current_station_id = self.settings['last-station-id']
-        # Local-file playback mode: the playlist is a static list of LocalSong
-        # objects instead of an endless Pandora station.
-        self.local_mode = False
+        # Active playback source (SOURCE_PANDORA / SOURCE_LOCAL / SOURCE_RADIO).
+        # Local and Radio are static playlists (of files / of favourite
+        # stations) instead of an endless Pandora station. ``local_mode`` below
+        # is derived from this for the many local-only call sites.
+        self.source = SOURCE_PANDORA
+        self._radio_reconnect_left = 0     # remaining auto-reconnects this stream
         self._local_dir = ''   # last folder used in the open dialogs
         # Play order for local playback (persisted; ignored for Pandora).
         self.shuffle = self.settings['shuffle']
@@ -309,6 +328,30 @@ class PyrrhaWindow(QMainWindow):
     @property
     def playing(self):
         return self._buffer_recovery_state is not PseudoGst.PAUSED
+
+    @property
+    def local_mode(self):
+        """True when playing local files. Kept as the historical name for the
+        many local-only call sites (queue editing, tag edit, playlist save)."""
+        return self.source == SOURCE_LOCAL
+
+    @property
+    def is_radio(self):
+        """True when playing internet radio (its own source, like Pandora)."""
+        return self.source == SOURCE_RADIO
+
+    @property
+    def static_playlist(self):
+        """True when the song list is a fixed list we own end-to-end (local
+        files or favourite radio stations) rather than a fetched Pandora
+        station: no prefetch, jumping stops at the ends, prev works."""
+        return self.source in (SOURCE_LOCAL, SOURCE_RADIO)
+
+    @property
+    def streaming(self):
+        """True when playback pulls from the network (Pandora or radio) and so
+        goes through the BUFFERING state instead of starting immediately."""
+        return self.source in (SOURCE_PANDORA, SOURCE_RADIO)
 
     PREQUEUE_TARGET = 8   # default; overridden by the 'prequeue-size' setting
 
@@ -442,8 +485,8 @@ class PyrrhaWindow(QMainWindow):
 
     def show_standard_view(self):
         """Switch from the skinned UI to the standard (native) window. This is
-        the dedicated Pandora UI, so leaving local playback for Pandora
-        streaming is implied — switch back if we were in local mode."""
+        the dedicated Pandora UI, so leaving local/radio playback for Pandora
+        streaming is implied — switch back if we weren't already on Pandora."""
         self._skinned_active = False
         self.settings['skinned-view'] = False   # remember for next start
         if self.skinned_shell is not None:
@@ -451,7 +494,7 @@ class PyrrhaWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:
             self.switch_to_pandora()
 
     def show_skinned_view(self, force_modern=True):
@@ -540,6 +583,7 @@ class PyrrhaWindow(QMainWindow):
         # show_standard_view). Local playback lives in the skinned views.
         menu = QMenu(self)
         menu.addAction(_('Stations…'), self.show_stations, QKeySequence('Ctrl+S'))
+        menu.addAction(_('Internet Radio…'), self.show_radio, QKeySequence('Ctrl+Shift+R'))
         menu.addAction(_('Preferences…'), self.show_preferences, QKeySequence('Ctrl+P'))
         menu.addSeparator()
         ui_menu = menu.addMenu(_('UI'))
@@ -838,7 +882,7 @@ class PyrrhaWindow(QMainWindow):
     def station_changed(self, station, reconnecting=False):
         if station is self.current_station:
             return
-        self.local_mode = False   # picking a station leaves local playback
+        self.source = SOURCE_PANDORA   # picking a station leaves local/radio
         self.waiting_for_playlist = False
         if not reconnecting:
             self.stop()
@@ -917,8 +961,18 @@ class PyrrhaWindow(QMainWindow):
             return self.songs_model.song_at(self.current_song_index)
 
     def start_song(self, song_index, jump=False):
-        if self.local_mode:
-            # Static playlist: stop at the ends instead of fetching more.
+        if self.source == SOURCE_RADIO:
+            # A station whose URL is a .pls/.m3u/.asx playlist must be unwrapped
+            # to the real stream URL before playbin gets it. Do it once, lazily,
+            # off the GUI thread, then re-enter start_song with the resolved URL.
+            song = self.songs_model.song_at(song_index)
+            if song is not None and getattr(song, '_needs_resolve', False):
+                song._needs_resolve = False
+                self._resolve_and_start(song_index, song, jump)
+                return
+        if self.static_playlist:
+            # Static playlist (local files / radio favourites): stop at the ends
+            # instead of fetching more.
             if not (0 <= song_index < len(self.songs_model)):
                 return self.stop()
         else:
@@ -975,7 +1029,11 @@ class PyrrhaWindow(QMainWindow):
             # fires — play immediately instead.
             self._set_player_state(PseudoGst.PLAYING, change_gst_state=True)
         else:
+            # Pandora and radio stream over the network → buffer first.
             self._set_player_state(PseudoGst.BUFFERING)
+        if self.source == SOURCE_RADIO:
+            # Fresh stream: restore the reconnect budget for drop recovery.
+            self._radio_reconnect_left = RADIO_RECONNECT_TRIES
         self.playcount += 1
 
         self.current_song.start_time = time.time()
@@ -988,11 +1046,12 @@ class PyrrhaWindow(QMainWindow):
         self.metadata_changed.emit(song)
 
     def remove_song(self, row):
-        """Remove a song from the queue (local playback only). Re-indexes the
-        remaining songs and adjusts the current index; removing the playing song
-        stops playback."""
-        if not self.local_mode or not (0 <= row < len(self.songs_model)):
+        """Remove a song from a static playlist (local files / radio
+        favourites). Re-indexes the remaining songs and adjusts the current
+        index; removing the playing song stops playback."""
+        if not self.static_playlist or not (0 <= row < len(self.songs_model)):
             return
+        station = self.songs_model.song_at(row)
         if row == self.current_song_index:
             self.stop()
             self.current_song_index = None
@@ -1000,6 +1059,11 @@ class PyrrhaWindow(QMainWindow):
             self.current_song_index -= 1
         self.songs_model.remove_row(row)
         self._reindex_songs()
+        # Removing a radio row also drops it from the saved favourites.
+        if self.source == SOURCE_RADIO and isinstance(station, radio.RadioStation):
+            favorites = [s for s in radio.load_favorites()
+                         if s.audioUrl != station.audioUrl]
+            radio.save_favorites(favorites)
 
     def remove_songs(self, rows):
         """Remove several rows (local playback). Descending order keeps indices
@@ -1008,8 +1072,8 @@ class PyrrhaWindow(QMainWindow):
             self.remove_song(r)
 
     def clear_playlist(self):
-        """Empty the local playlist and stop playback."""
-        if not self.local_mode:
+        """Empty a static playlist (local files / radio favourites) and stop."""
+        if not self.static_playlist:
             return
         self.stop()
         self.current_song_index = None
@@ -1042,9 +1106,10 @@ class PyrrhaWindow(QMainWindow):
 
     def move_songs(self, rows, target):
         """Move ``rows`` so they land at insertion index ``target`` (before the
-        original row at that index). Local playback only; keeps the current song
-        current. Returns the moved block's new start row, or None on no-op."""
-        if not self.local_mode:
+        original row at that index). Static playlists only (local files / radio
+        favourites); keeps the current song current. Returns the moved block's
+        new start row, or None on no-op."""
+        if not self.static_playlist:
             return None
         n = len(self.songs_model)
         moving = sorted(r for r in set(rows) if 0 <= r < n)
@@ -1063,7 +1128,19 @@ class PyrrhaWindow(QMainWindow):
                 if self.songs_model.song_at(r) is cur_song:
                     self.current_song_index = r
                     break
+        if self.source == SOURCE_RADIO:
+            self._persist_radio_order()
         return before
+
+    def _persist_radio_order(self):
+        """Save the current radio row order back to the favourites file, keeping
+        only rows that are saved favourites (a standalone tuned-in station that
+        isn't a favourite is left out)."""
+        fav_urls = {s.audioUrl for s in radio.load_favorites()}
+        ordered = [s for i in range(len(self.songs_model))
+                   if isinstance(s := self.songs_model.song_at(i), radio.RadioStation)
+                   and s.audioUrl in fav_urls]
+        radio.save_favorites(ordered)
 
     def _reindex_songs(self):
         for r in range(len(self.songs_model)):     # keep song.index == its row
@@ -1077,7 +1154,7 @@ class PyrrhaWindow(QMainWindow):
         if self.current_song_index is None:
             return
         n = len(self.songs_model)
-        if self.local_mode:
+        if self.static_playlist:
             idx = self._next_local_index(+1)
             for _ in range(n):                 # advance past skip-marked songs
                 if idx is None or not self._is_skipped(idx):
@@ -1108,8 +1185,9 @@ class PyrrhaWindow(QMainWindow):
                 song.skip = bool(skip)
 
     def prev_song(self, *ignore):
-        # Only local playback can go backwards; Pandora streams can't be rewound.
-        if not self.local_mode or self.current_song_index is None:
+        # Only static playlists can go backwards; a Pandora stream can't be
+        # rewound (radio favourites can, moving between stations).
+        if not self.static_playlist or self.current_song_index is None:
             return
         idx = self._next_local_index(-1)
         if idx is not None:
@@ -1312,7 +1390,7 @@ class PyrrhaWindow(QMainWindow):
             return
 
         self.stop()
-        self.local_mode = True
+        self.source = SOURCE_LOCAL
         self.current_station = None
         self.current_song_index = None
         self.songs_model.clear()
@@ -1343,7 +1421,7 @@ class PyrrhaWindow(QMainWindow):
         files/folders. No-op if already in local mode."""
         if self.local_mode:
             return
-        self.local_mode = True
+        self.source = SOURCE_LOCAL
         self.stop()
         self.current_station = None
         self.current_song_index = None
@@ -1352,10 +1430,10 @@ class PyrrhaWindow(QMainWindow):
         self.setWindowTitle('Pyrrha')
 
     def switch_to_pandora(self):
-        """Leave Local Playback and return to the last Pandora station."""
-        if not self.local_mode:
+        """Leave Local/Radio playback and return to the last Pandora station."""
+        if self.source == SOURCE_PANDORA:
             return
-        self.local_mode = False
+        self.source = SOURCE_PANDORA
         self.stop()
         self.current_song_index = None
         self.songs_model.clear()
@@ -1366,6 +1444,155 @@ class PyrrhaWindow(QMainWindow):
             self.station_changed(station)   # current_station is None, so this runs
         else:
             self.show_stations()
+
+    def tune_radio(self, station):
+        """Tune in an internet-radio station: switch to the radio source, show
+        the saved favourites as the song list (with this station included), and
+        start streaming the chosen one. The list rows are RadioStation objects,
+        so next/prev walks between favourites and ICY tags update the row in
+        place (see on_gst_tag)."""
+        self.stop()
+        self.source = SOURCE_RADIO
+        self.current_station = None
+        self.current_song_index = None
+        self._shuffle_order = None
+        self.songs_model.clear()
+
+        stations = radio.load_favorites()
+        idx = next((i for i, s in enumerate(stations)
+                    if s.audioUrl == station.audioUrl), None)
+        if idx is None:                 # not a saved favourite: play it standalone
+            stations.insert(0, station)
+            idx = 0
+        for s in stations:
+            s.index = len(self.songs_model)
+            self.songs_model.append_song(s)
+            self.update_song_row(s)
+            self._fetch_station_art(s)
+
+        self.stations_button.setText(_('Internet Radio'))
+        self.setWindowTitle('Pyrrha')
+        self.start_song(idx)
+
+        if station.stationuuid:         # popularity ping, best-effort
+            self.worker_run(radiobrowser.click,
+                            (station.stationuuid, self.get_proxy()),
+                            None, None, context=None)
+
+    def _fetch_station_art(self, song):
+        """Download a radio station's logo (favicon) on the worker thread and
+        set it as the row pixmap — the radio analogue of the Pandora album-art
+        fetch. Best-effort; a missing/broken logo just leaves the generic icon.
+        Keyed off the stable trackToken (the station's artist changes with each
+        ICY update, so it can't key the cache like Pandora's artist+album)."""
+        if not getattr(song, 'artRadio', None):
+            return
+
+        def fetch(url, tmpdir, station, index):
+            try:
+                with urllib.request.urlopen(url, timeout=10) as f:
+                    image = f.read()
+            except (urllib.error.URLError, OSError) as e:
+                logging.info('Could not fetch station logo %s: %s', url, e)
+                return (None, None, station, index)
+            file_url = None
+            if tmpdir:
+                try:
+                    self.clear_art_cache()
+                    name = hashlib.sha256(
+                        station.trackToken.encode('utf-8')).hexdigest() + '.img'
+                    cache_file_path = os.path.join(self.tempdir, name)
+                    file_url = urllib.parse.urljoin(
+                        'file://', urllib.parse.quote(cache_file_path))
+                    if not os.path.exists(cache_file_path):
+                        with open(cache_file_path, 'xb') as fh:
+                            fh.write(image)
+                except IOError:
+                    logging.warning('Failed to write station-art tempfile')
+            return (image, file_url, station, index)
+
+        def done(t):
+            image, file_url, station, index = t
+            # Guard against the list having changed since the fetch started.
+            if not (self.source == SOURCE_RADIO
+                    and 0 <= index < len(self.songs_model)
+                    and self.songs_model.song_at(index) is station):
+                return
+            if image is None:
+                return
+            img = QImage.fromData(image)
+            if img.isNull():
+                return
+            pixmap = QPixmap.fromImage(img.scaled(
+                ALBUM_ART_SIZE, ALBUM_ART_SIZE,
+                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+            station.art_pixbuf = pixmap
+            self.songs_model.update_row(index, pixmap=pixmap)
+            self.update_song_row(station)
+            if file_url:
+                station.artUrl = file_url
+                if station is self.current_song:
+                    self.metadata_changed.emit(station)
+
+        self.worker_run(fetch, (song.artRadio, self.tempdir, song, song.index),
+                        done, None, context=None)
+
+    def _resolve_and_start(self, song_index, song, jump):
+        """Resolve a playlist-wrapped radio URL on a worker, then start it. The
+        resolved URL is cached on the station, so subsequent plays skip this."""
+        def still_current():
+            return (self.source == SOURCE_RADIO
+                    and 0 <= song_index < len(self.songs_model)
+                    and self.songs_model.song_at(song_index) is song)
+
+        def resolved(url):
+            if not still_current():
+                return
+            if url and url != song.audioUrl:
+                song.audioUrl = url
+            self.start_song(song_index, jump=jump)
+
+        def failed(error):
+            self.status_pop('net')
+            logging.info('Stream resolve failed: %s', getattr(error, 'traceback', error))
+            if still_current():
+                self.start_song(song_index, jump=jump)   # fall back to the raw URL
+
+        self.worker_run(radio.resolve_stream_url, (song.audioUrl, self.get_proxy()),
+                        resolved, _('Resolving stream…'), errorback=failed)
+
+    # ------------------------------------------------------- radio favourites
+    def is_radio_favorite(self, station):
+        return any(s.audioUrl == station.audioUrl
+                   for s in radio.load_favorites())
+
+    def add_radio_favorite(self, station):
+        """Persist a station to the favourites file and, when already in radio
+        mode, append it as a new row (with its logo)."""
+        favorites = radio.load_favorites()
+        if any(s.audioUrl == station.audioUrl for s in favorites):
+            return
+        favorites.append(station)
+        radio.save_favorites(favorites)
+        if self.source == SOURCE_RADIO and not any(
+                self.songs_model.song_at(i).audioUrl == station.audioUrl
+                for i in range(len(self.songs_model))):
+            station.index = len(self.songs_model)
+            self.songs_model.append_song(station)
+            self.update_song_row(station)
+            self._fetch_station_art(station)
+
+    def remove_radio_favorite(self, station):
+        """Drop a station from the favourites file and, when in radio mode,
+        remove its row."""
+        favorites = [s for s in radio.load_favorites()
+                     if s.audioUrl != station.audioUrl]
+        radio.save_favorites(favorites)
+        if self.source == SOURCE_RADIO:
+            for i in range(len(self.songs_model)):
+                if self.songs_model.song_at(i).audioUrl == station.audioUrl:
+                    self.remove_song(i)
+                    break
 
     def _find_station(self, station_id):
         if station_id is None:
@@ -1496,8 +1723,8 @@ class PyrrhaWindow(QMainWindow):
             self._ensure_queue_buffer()
 
     def get_playlist(self, start=False):
-        if self.local_mode:
-            return   # local playlists are static; never fetched from Pandora
+        if self.local_mode or self.current_station is None:
+            return   # only a Pandora station is fetched; local/radio are static
         if self.playlist_update_timer_id:
             GLib.source_remove(self.playlist_update_timer_id)
         self.playlist_update_timer_id = 0
@@ -1638,13 +1865,54 @@ class PyrrhaWindow(QMainWindow):
         if self.current_song.get_duration_sec() != self.current_song.trackLength:
             self.metadata_changed.emit(self.current_song)
 
+    def on_gst_tag(self, bus, message):
+        """ICY now-playing: Icecast/Shoutcast push the current track as a tag
+        message carrying GST_TAG_TITLE ("Artist - Title"). Apply it to the
+        station row so the list, window title, and every metadata consumer
+        (MPRIS, tray, notifications, Last.fm scrobbling) update live."""
+        if self.source != SOURCE_RADIO or self.current_song is None:
+            return
+        taglist = message.parse_tag()
+        ok, streamtitle = taglist.get_string(Gst.TAG_TITLE)
+        if not ok or not streamtitle:
+            return
+        if not self.current_song.set_stream_title(streamtitle):
+            return
+        song = self.current_song
+        os.environ['PULSE_PROP_media.title'] = song.title
+        os.environ['PULSE_PROP_media.artist'] = song.artist
+        self.setWindowTitle("%s by %s - Pyrrha" % (song.title, song.artist))
+        self.update_song_row()
+        self.metadata_changed.emit(song)
+
     def on_gst_eos(self, bus, message):
         logging.info("EOS")
         if self._sleep_end_of_track:
             self._sleep_end_of_track = False
             self.stop()
             return
+        if self.source == SOURCE_RADIO:
+            # A live stream shouldn't end; EOS means the connection dropped.
+            # Retry the same station a few times before advancing/stopping.
+            self._radio_reconnect()
+            return
         self.next_song()
+
+    def _radio_reconnect(self):
+        song = self.current_song
+        if song is None:
+            return
+        if self._radio_reconnect_left <= 0:
+            logging.info("Radio stream '%s' ended; giving up reconnect.", song.name)
+            song.message = _('Stream unavailable')
+            self.update_song_row()
+            return self.stop()
+        self._radio_reconnect_left -= 1
+        logging.info("Radio stream '%s' dropped; reconnecting (%d left).",
+                     song.name, self._radio_reconnect_left)
+        self.stop()
+        self.player.set_property("uri", song.audioUrl)
+        self._set_player_state(PseudoGst.BUFFERING)
 
     def on_gst_plugin_installed(self, result, userdata):
         if result == GstPbutils.InstallPluginsReturn.SUCCESS:
@@ -1931,11 +2199,19 @@ class PyrrhaWindow(QMainWindow):
         artist = html.escape(song.artist)
         album = html.escape(song.album)
         msg = []
+        is_radio = isinstance(song, radio.RadioStation)
         if song is self.current_song:
             song.position = self.query_position()
             if song.bitrate is not None:
                 msg.append("%skbit/s" % (song.bitrate))
-            if song.position is not None and getattr(song, 'duration', None) is not None:
+            if is_radio:
+                # A live stream has no length: show LIVE + elapsed, not a ratio.
+                msg.append("LIVE")
+                if song.position is not None:
+                    msg.append(self.format_time(song.position))
+                if self.playing is False:
+                    msg.append("Paused")
+            elif song.position is not None and getattr(song, 'duration', None) is not None:
                 pos_str = self.format_time(song.position)
                 msg.append("%s / %s" % (pos_str, song.duration_message))
                 if self.playing is False:
@@ -2010,9 +2286,9 @@ class PyrrhaWindow(QMainWindow):
         song = self.selected_song()
         if song is None or self.current_song_index is None:
             return False
-        # Pandora only lets you jump forward in the endless playlist; local
-        # playlists are static, so any track is playable.
-        playable = self.local_mode or song.index > self.current_song_index
+        # Pandora only lets you jump forward in the endless playlist; static
+        # playlists (local files / radio favourites) let you play any row.
+        playable = self.static_playlist or song.index > self.current_song_index
         if playable:
             self.start_song(song.index, jump=True)
         return playable
@@ -2025,14 +2301,14 @@ class PyrrhaWindow(QMainWindow):
         return callback
 
     def love_song(self, *ignore, song=None):
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:   # ratings are Pandora-only
             return
         song = song or self.current_song
         if song:
             self.worker_run(song.rate, (RATE_LOVE,), self._rate_callback(song), "Loving song...")
 
     def ban_song(self, *ignore, song=None):
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:
             return
         song = song or self.current_song
         if not song:
@@ -2042,7 +2318,7 @@ class PyrrhaWindow(QMainWindow):
             self.next_song()
 
     def unrate_song(self, *ignore, song=None):
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:
             return
         song = song or self.current_song
         if song:
@@ -2050,7 +2326,7 @@ class PyrrhaWindow(QMainWindow):
                             "Removing song rating...")
 
     def tired_song(self, *ignore, song=None):
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:
             return
         song = song or self.current_song
         if not song:
@@ -2060,14 +2336,14 @@ class PyrrhaWindow(QMainWindow):
             self.next_song()
 
     def bookmark_song(self, *ignore, song=None):
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:
             return
         song = song or self.current_song
         if song:
             self.worker_run(song.bookmark, (), None, "Bookmarking...")
 
     def bookmark_song_artist(self, *ignore, song=None):
-        if self.local_mode:
+        if self.source != SOURCE_PANDORA:
             return
         song = song or self.current_song
         if song:
@@ -2079,7 +2355,8 @@ class PyrrhaWindow(QMainWindow):
             if song is not None:
                 self.edit_local_tags(song)
             return
-        if song:
+        # Pandora → song web page; radio → station homepage (if any).
+        if song and song.songDetailURL:
             self.open_url(song.songDetailURL)
 
     def edit_local_tags(self, song):
@@ -2157,6 +2434,21 @@ class PyrrhaWindow(QMainWindow):
         if song is None:
             return
         menu = QMenu(self)
+        if self.source == SOURCE_RADIO:
+            # Radio is its own mode: tune in, manage favourites, open homepage.
+            menu.addAction(_('Play'), lambda: self.start_song(song.index))
+            menu.addSeparator()
+            if self.is_radio_favorite(song):
+                menu.addAction(_('Remove from Favourites'),
+                               lambda: self.remove_radio_favorite(song))
+            else:
+                menu.addAction(_('Add to Favourites'),
+                               lambda: self.add_radio_favorite(song))
+            if song.songDetailURL:
+                menu.addAction(_('Station Homepage'),
+                               lambda: self.open_url(song.songDetailURL))
+            menu.exec(self.songs_view.viewport().mapToGlobal(pos))
+            return
         if self.local_mode:
             # Ratings/bookmarks/stations are Pandora-only; offer just playback.
             menu.addAction(_('Play'), lambda: self.start_song(song.index))
@@ -2270,6 +2562,18 @@ class PyrrhaWindow(QMainWindow):
 
     def _on_stations_dlg_closed(self, *ignore):
         self.stations_dlg = None
+
+    def show_radio(self):
+        if getattr(self, 'radio_dlg', None) is not None:
+            self.radio_dlg.raise_()
+            self.radio_dlg.activateWindow()
+        else:
+            self.radio_dlg = RadioDialog(self, self)
+            self.radio_dlg.finished.connect(self._on_radio_dlg_closed)
+            self.radio_dlg.show()
+
+    def _on_radio_dlg_closed(self, *ignore):
+        self.radio_dlg = None
 
     # --------------------------------------------------------------- close
     def closeEvent(self, event):
