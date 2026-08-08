@@ -155,7 +155,7 @@ class JumpToFileDialog(QDialog):
         c = self.ctl
         cur = getattr(c, 'current_song_index', None)
         if getattr(c, 'local_mode', False) or cur is None or index > cur:
-            c.start_song(index)
+            c.start_song(index, jump=True)
 
     # ------------------------------------------------------------ events
     def eventFilter(self, obj, event):

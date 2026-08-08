@@ -570,7 +570,7 @@ class PyrrhaMprisService(DBusServiceObject):
     def GoTo(self, TrackId):
         song = self._song_from_track_id(TrackId)
         if song and song.index > self.window.current_song_index and not (song.tired or song.rating == 'ban'):
-            self.window.start_song(song.index)
+            self.window.start_song(song.index, jump=True)
 
     # -- Ratings extension methods ----------------------------------------
     @dbus_method(MEDIA_PLAYER2_RATINGS_IFACE, in_signature='o')

@@ -396,7 +396,7 @@ class SkinnedPlaylistWindow(QWidget):
             return
         idx, cur = self._focus, self.ctl.current_song_index
         if getattr(self.ctl, 'local_mode', False) or (cur is not None and idx > cur):
-            self.ctl.start_song(idx)
+            self.ctl.start_song(idx, jump=True)
 
     def _remove_selection(self):
         if not self._selection or not getattr(self.ctl, 'local_mode', False):
@@ -833,7 +833,7 @@ class SkinnedPlaylistWindow(QWidget):
             cur = self.ctl.current_song_index
             # Local playback can start any track; Pandora can only go forward.
             if self.ctl.local_mode or (cur is not None and idx > cur):
-                self.ctl.start_song(idx)
+                self.ctl.start_song(idx, jump=True)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
