@@ -49,6 +49,7 @@ from .pandora import (
     PandoraError, PandoraAuthTokenInvalid, PandoraAPIVersionError,
     RATE_BAN, RATE_LOVE, RATE_NONE,
 )
+from .pandora.pandora import Song
 from .pandora.data import (
     client_keys, default_client_id, default_one_client_id,
 )
@@ -105,6 +106,18 @@ SOURCE_RADIO = 'radio'
 
 # How many times to silently reconnect a dropped radio stream before giving up.
 RADIO_RECONNECT_TRIES = 3
+
+# How often to prune Pandora songs whose audio URLs have expired (seconds).
+PANDORA_PRUNE_INTERVAL = 60
+
+
+def _song_still_valid(song):
+    """Whether a queued song is still playable (Pandora URLs expire after an
+    hour). Local/radio songs are always valid. Never raises."""
+    try:
+        return bool(song.is_still_valid())
+    except Exception:
+        return False
 
 
 def parse_proxy(proxy):
@@ -285,6 +298,12 @@ class PyrrhaWindow(QMainWindow):
         # is derived from this for the many local-only call sites.
         self.source = SOURCE_PANDORA
         self._radio_reconnect_left = 0     # remaining auto-reconnects this stream
+        # Persisted Pandora queue: a stash of the current station's songs +
+        # position, kept when leaving Pandora (mode switch) and saved to disk on
+        # close, so returning/reopening resumes it instead of refetching. Guarded
+        # by each song's 1-hour validity (see _prune_expired_songs / restore).
+        self._pandora_saved = None         # {'station_id', 'songs', 'index'} or None
+        self._pandora_disk_loaded = False  # one-time disk restore on first connect
         self._local_dir = ''   # last folder used in the open dialogs
         # Play order for local playback (persisted; ignored for Pandora).
         self.shuffle = self.settings['shuffle']
@@ -312,6 +331,9 @@ class PyrrhaWindow(QMainWindow):
         self.worker = Worker()
         self._status_messages = {}
         self._station_eq = self._load_station_eq()
+        # Periodically drop Pandora songs whose audio URLs have expired.
+        self._prune_timer_id = GLib.timeout_add_seconds(
+            PANDORA_PRUNE_INTERVAL, self._on_prune_timer)
         self.skinned_shell = None     # set by __main__ when launched with --skin
         self._skinned_active = False  # True while the skinned shell is the shown view
 
@@ -843,6 +865,11 @@ class PyrrhaWindow(QMainWindow):
         return self.stations_model
 
     def process_stations(self, *ignore):
+        # First connect of the session: pull a saved queue off disk so the
+        # station selected below resumes it instead of fetching (paused).
+        if not self._pandora_disk_loaded:
+            self._pandora_disk_loaded = True
+            self._load_pandora_queue_from_disk()
         self.stations_model = []
         self.current_station = None
         selected = None
@@ -893,7 +920,11 @@ class PyrrhaWindow(QMainWindow):
         self.current_station = station
         self.settings.set_string('last-station-id', self.current_station_id)
         if not reconnecting:
-            self.get_playlist(start=True)
+            # Resume a saved queue for this station (mode switch or restart)
+            # instead of fetching a fresh playlist; only fetch if there's nothing
+            # valid to restore.
+            if not self._restore_pandora_queue(station):
+                self.get_playlist(start=True)
         self.stations_button.setText(station.name)
         self.stations_popover.select_station(station)
         self.station_changed_sig.emit(station)
@@ -1389,6 +1420,7 @@ class PyrrhaWindow(QMainWindow):
                 self.start_song(first_new)
             return
 
+        self._snapshot_pandora()   # keep the Pandora queue to resume later
         self.stop()
         self.source = SOURCE_LOCAL
         self.current_station = None
@@ -1421,6 +1453,7 @@ class PyrrhaWindow(QMainWindow):
         files/folders. No-op if already in local mode."""
         if self.local_mode:
             return
+        self._snapshot_pandora()   # keep the Pandora queue to resume later
         self.source = SOURCE_LOCAL
         self.stop()
         self.current_station = None
@@ -1451,6 +1484,7 @@ class PyrrhaWindow(QMainWindow):
         start streaming the chosen one. The list rows are RadioStation objects,
         so next/prev walks between favourites and ICY tags update the row in
         place (see on_gst_tag)."""
+        self._snapshot_pandora()   # keep the Pandora queue to resume later
         self.stop()
         self.source = SOURCE_RADIO
         self.current_station = None
@@ -1468,7 +1502,7 @@ class PyrrhaWindow(QMainWindow):
             s.index = len(self.songs_model)
             self.songs_model.append_song(s)
             self.update_song_row(s)
-            self._fetch_station_art(s)
+            self._fetch_row_art(s)
 
         self.stations_button.setText(_('Internet Radio'))
         self.setWindowTitle('Pyrrha')
@@ -1479,12 +1513,11 @@ class PyrrhaWindow(QMainWindow):
                             (station.stationuuid, self.get_proxy()),
                             None, None, context=None)
 
-    def _fetch_station_art(self, song):
-        """Download a radio station's logo (favicon) on the worker thread and
-        set it as the row pixmap — the radio analogue of the Pandora album-art
-        fetch. Best-effort; a missing/broken logo just leaves the generic icon.
-        Keyed off the stable trackToken (the station's artist changes with each
-        ICY update, so it can't key the cache like Pandora's artist+album)."""
+    def _fetch_row_art(self, song):
+        """Download a song/station's ``artRadio`` image on the worker thread and
+        set it as the row pixmap. Used for radio-station logos and for restored
+        Pandora rows (whose art wasn't serialised). Best-effort; keyed off the
+        stable trackToken."""
         if not getattr(song, 'artRadio', None):
             return
 
@@ -1514,8 +1547,7 @@ class PyrrhaWindow(QMainWindow):
         def done(t):
             image, file_url, station, index = t
             # Guard against the list having changed since the fetch started.
-            if not (self.source == SOURCE_RADIO
-                    and 0 <= index < len(self.songs_model)
+            if not (0 <= index < len(self.songs_model)
                     and self.songs_model.song_at(index) is station):
                 return
             if image is None:
@@ -1580,7 +1612,7 @@ class PyrrhaWindow(QMainWindow):
             station.index = len(self.songs_model)
             self.songs_model.append_song(station)
             self.update_song_row(station)
-            self._fetch_station_art(station)
+            self._fetch_row_art(station)
 
     def remove_radio_favorite(self, station):
         """Drop a station from the favourites file and, when in radio mode,
@@ -1601,6 +1633,136 @@ class PyrrhaWindow(QMainWindow):
             if row[0].id == station_id:
                 return row[0]
         return None
+
+    # -------------------------------------------------- Pandora queue persistence
+    def _snapshot_pandora(self):
+        """Capture the current Pandora queue into ``_pandora_saved`` so it can be
+        restored later. No-op unless we're actually on a Pandora station."""
+        if self.source != SOURCE_PANDORA or self.current_station is None:
+            return
+        songs = [self.songs_model.song_at(i) for i in range(len(self.songs_model))]
+        songs = [s for s in songs if s is not None]
+        if not songs:
+            return
+        self._pandora_saved = {
+            'station_id': self.current_station_id,
+            'songs': songs,
+            'index': self.current_song_index,
+        }
+
+    def _restore_pandora_queue(self, station):
+        """Repopulate the song list for ``station`` from the saved queue, pruning
+        expired songs, and cue (but do NOT play) the song we left off on. Returns
+        True if a usable queue was restored; False to fall back to fetching."""
+        saved, self._pandora_saved = self._pandora_saved, None   # consume
+        if not saved or saved.get('station_id') != station.id:
+            return False
+        all_songs = saved.get('songs') or []
+        songs = [s for s in all_songs if _song_still_valid(s)]
+        if not songs:
+            return False
+
+        self.songs_model.clear()
+        for i, s in enumerate(songs):
+            s.index = i
+            s.start_time = s.position = None
+            s.finished = False
+            self.songs_model.append_song(s)
+            self.update_song_row(s)
+            if getattr(s, 'art_pixbuf', None) is None:
+                self._fetch_row_art(s)
+
+        # Keep pointing at the song we left off on if it survived pruning.
+        old_index = saved.get('index')
+        target = all_songs[old_index] if (old_index is not None
+                                          and 0 <= old_index < len(all_songs)) else None
+        self.current_song_index = songs.index(target) if target in songs else 0
+
+        cur = songs[self.current_song_index]
+        idx = self.songs_model.index(self.current_song_index)
+        self.songs_view.setCurrentIndex(idx)
+        self.songs_view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        self.setWindowTitle("%s by %s - Pyrrha" % (cur.title, cur.artist))
+        # Cue paused: update MPRIS/UI metadata but do NOT emit song_changed (which
+        # would trigger scrobbling and a queue-buffer fetch) — playback is stopped
+        # until the user hits play (see play() resume-from-stopped).
+        self.metadata_changed.emit(cur)
+        logging.info('Restored Pandora queue: %d songs (of %d), at index %d',
+                     len(songs), len(all_songs), self.current_song_index)
+        return True
+
+    def _prune_expired_songs(self):
+        """Drop upcoming Pandora songs whose audio URLs have expired, and top the
+        queue back up if that left it short. Runs on a periodic timer and before
+        playing. Only touches songs *after* the current one."""
+        if self.source != SOURCE_PANDORA:
+            return 0
+        cur = self.current_song_index if self.current_song_index is not None else -1
+        removed = 0
+        for r in range(len(self.songs_model) - 1, cur, -1):
+            s = self.songs_model.song_at(r)
+            if s is not None and not _song_still_valid(s):
+                self.songs_model.remove_row(r)
+                removed += 1
+        if removed:
+            self._reindex_songs()
+            self._ensure_queue_buffer()
+        return removed
+
+    def _on_prune_timer(self):
+        self._prune_expired_songs()
+        return True   # keep the GLib timeout running
+
+    # -- disk persistence --
+    def _pandora_queue_file(self):
+        d = os.path.join(GLib.get_user_config_dir(), 'pyrrha')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'pandora_queue.json')
+
+    def _save_pandora_queue(self):
+        """Write the saved Pandora queue to disk (called on quit). Snapshots the
+        live queue first if we're currently on Pandora."""
+        self._snapshot_pandora()
+        saved = self._pandora_saved
+        songs = (saved or {}).get('songs') or []
+        try:
+            path = self._pandora_queue_file()
+            states = [s.to_state() for s in songs if hasattr(s, 'to_state')]
+            if not states:
+                if os.path.exists(path):
+                    os.remove(path)
+                return
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({'station_id': saved['station_id'],
+                           'index': saved.get('index'),
+                           'saved_at': time.time(), 'songs': states}, f)
+        except (OSError, ValueError, KeyError) as e:
+            logging.warning('Could not save Pandora queue: %s', e)
+
+    def _load_pandora_queue_from_disk(self):
+        """Load a previously saved Pandora queue into ``_pandora_saved`` (pruning
+        expired songs). Requires a connected ``pandora`` for song rebuild."""
+        try:
+            with open(self._pandora_queue_file(), encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            logging.warning('Could not read Pandora queue: %s', e)
+            return
+        songs = []
+        for st in data.get('songs', []):
+            try:
+                song = Song.from_state(self.pandora, st)
+            except Exception as e:
+                logging.info('Skipping unrestorable Pandora song: %s', e)
+                continue
+            if _song_still_valid(song):
+                songs.append(song)
+        if songs:
+            self._pandora_saved = {'station_id': data.get('station_id'),
+                                   'songs': songs, 'index': data.get('index')}
+            logging.info('Loaded %d valid Pandora songs from disk', len(songs))
 
     # --------------------------------------------------------- state machine
     def _set_player_state(self, target, change_gst_state=False):
@@ -1632,6 +1794,11 @@ class PyrrhaWindow(QMainWindow):
             self.current_song.message = 'Song expired'
             self.update_song_row()
             return self.next_song()
+        if self._current_state is PseudoGst.STOPPED:
+            # Cued but never started (e.g. a restored queue): start it now.
+            self.start_song(self.current_song_index
+                            if self.current_song_index is not None else 0)
+            return True
         if self._set_player_state(PseudoGst.PLAYING, change_gst_state=change_gst_state):
             self.playpause_button.setIcon(self._pause_icon())
             self.play_state_changed.emit(True)
@@ -1656,14 +1823,18 @@ class PyrrhaWindow(QMainWindow):
             self.playpause_button.setIcon(self._pause_icon())
 
     def user_playpause(self, *ignore):
-        if self.playing:
+        if self._current_state is PseudoGst.STOPPED:
+            self.user_play()          # cued/stopped queue → start it
+        elif self.playing:
             self.user_pause()
         else:
             self.user_play()
 
     def playpause(self, *ignore):
         # Plain toggle without the user_* semantics (used by MPRIS PlayPause).
-        if self.playing:
+        if self._current_state is PseudoGst.STOPPED:
+            self.play()
+        elif self.playing:
             self.pause()
         else:
             self.play()
@@ -1679,6 +1850,7 @@ class PyrrhaWindow(QMainWindow):
 
     def quit(self, *ignore):
         # An explicit quit (tray menu, MPRIS) bypasses close interceptors.
+        self._save_pandora_queue()
         self.stop()
         self.app.quit()
 
@@ -2587,6 +2759,7 @@ class PyrrhaWindow(QMainWindow):
                     return
             except Exception:
                 logging.exception('close interceptor failed')
+        self._save_pandora_queue()
         self.stop()
         super().closeEvent(event)
         self.app.quit()
