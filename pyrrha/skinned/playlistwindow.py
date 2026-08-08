@@ -438,15 +438,19 @@ class SkinnedPlaylistWindow(QWidget):
             self.ctl.set_songs_skip(rows, value)
             self.update()
 
-    def _skip_selected_songs(self):
-        """Pandora: Del marks the selected upcoming songs to be skipped when
-        advancing. The currently-playing song can't be skipped mid-stream, and
-        songs already behind the playhead won't play again, so both are excluded
-        — only rows ahead of the current one are affected."""
+    def _skippable_selection(self):
+        """Selected rows eligible for preemptive skip: only those ahead of the
+        current song. The playing song can't be skipped mid-stream and songs
+        behind the playhead won't recur, so both are excluded."""
         cur = self.ctl.current_song_index
-        rows = sorted(i for i in self._selection if cur is None or i > cur)
+        return sorted(i for i in self._selection if cur is None or i > cur)
+
+    def _skip_selected_songs(self, value=True):
+        """Mark (or unmark) the eligible selected upcoming songs to be skipped
+        when advancing. Backs both the Del key and the Rem-button menu."""
+        rows = self._skippable_selection()
         if rows and hasattr(self.ctl, 'set_songs_skip'):
-            self.ctl.set_songs_skip(rows, True)
+            self.ctl.set_songs_skip(rows, value)
             self.update()
 
     def _dim(self, c):
@@ -496,14 +500,24 @@ class SkinnedPlaylistWindow(QWidget):
                 m.addSeparator()
                 m.addAction(_('Switch to Local Playback'), c.switch_to_local)
         elif btn == 'rem':
-            a = m.addAction(_('Remove Selected'), self._remove_selection)
-            a.setEnabled(local and have_sel)
-            a = m.addAction(_('Crop (keep selected)'), self._crop_to_selection)
-            a.setEnabled(local and have_sel)
-            a = m.addAction(_('Remove Missing Files'), self._remove_missing)
-            a.setEnabled(local and len(self._rows()) > 0)
-            a = m.addAction(_('Remove All'), self._clear_playlist)
-            a.setEnabled(local and len(self._rows()) > 0)
+            if local:
+                a = m.addAction(_('Remove Selected'), self._remove_selection)
+                a.setEnabled(have_sel)
+                a = m.addAction(_('Crop (keep selected)'), self._crop_to_selection)
+                a.setEnabled(have_sel)
+                a = m.addAction(_('Remove Missing Files'), self._remove_missing)
+                a.setEnabled(len(self._rows()) > 0)
+                a = m.addAction(_('Remove All'), self._clear_playlist)
+                a.setEnabled(len(self._rows()) > 0)
+            else:
+                # The Pandora queue is read-only, so Rem preemptively skips the
+                # selected upcoming songs instead (never the playing one) — the
+                # same action as the Del key.
+                skippable = bool(self._skippable_selection())
+                a = m.addAction(_('Skip Selected'), lambda: self._skip_selected_songs(True))
+                a.setEnabled(skippable)
+                a = m.addAction(_('Don’t Skip Selected'), lambda: self._skip_selected_songs(False))
+                a.setEnabled(skippable)
         elif btn == 'sel':
             m.addAction(_('Select All'), self._select_all)
             m.addAction(_('Select None'), self._select_none)
