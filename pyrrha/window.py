@@ -494,6 +494,14 @@ class PyrrhaWindow(QMainWindow):
             self.skinned_shell.load_skin(installed)
         event.acceptProposedAction()
 
+    def open_visualizer(self):
+        """Open the large visualizer window. The skinned shell hosts it, so build
+        the shell on first use (kept hidden — this doesn't switch the player view)
+        if it doesn't exist yet. Reachable from the standard view's Preferences."""
+        if self.skinned_shell is None and not self._build_skinned_shell(force_modern=False):
+            return
+        self.skinned_shell.open_vis_window()
+
     def _build_skinned_shell(self, force_modern=True):
         """Create the Winamp-skinned shell on demand from the last-used skin, or
         the first available one (bundled or in the user's skins dir). Returns
