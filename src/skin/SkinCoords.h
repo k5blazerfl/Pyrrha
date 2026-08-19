@@ -90,4 +90,40 @@ inline constexpr int kTitlebarDragH = 14;  // top strip that moves the window
 // Transport button hit-rect (its destination rect).
 inline constexpr Rect buttonRect(const Button &b) { return {b.dx, b.dy, b.w, b.h}; }
 
+// -- equalizer window (eqmain.bmp / eq_ex.bmp, 275×116) ---------------------
+namespace eq {
+inline constexpr int kW = 275;
+inline constexpr int kH = 116;
+inline constexpr int kBands = 10;
+
+// Sliders: a 11×11 thumb travelling kSliderTravel px from kSliderTop.
+inline constexpr int kSliderTop = 34;
+inline constexpr int kSliderTravel = 59;
+inline constexpr int kThumbW = 11;
+inline constexpr int kThumbH = 11;
+inline constexpr int kThumbSrcX = 0;      // idle thumb in eqmain.bmp
+inline constexpr int kThumbSrcY = 164;
+inline constexpr int kThumbSrcYDrag = 176;
+
+inline constexpr int kPreampX = 21;   // preamp slider x
+inline constexpr int kBandX0 = 78;    // first band slider x
+inline constexpr int kBandDX = 18;    // spacing between bands
+
+inline constexpr Rect kOnBtn{14, 18, 25, 12};
+inline constexpr Rect kAutoBtn{39, 18, 34, 12};
+inline constexpr Rect kPresetsBtn{217, 18, 44, 12};
+inline constexpr Rect kMinBtn{254, 3, 9, 9};
+inline constexpr Rect kCloseBtn{264, 3, 9, 9};
+inline constexpr Rect kGraph{86, 17, 113, 19};
+
+// x of band slider i (0 = preamp, 1..10 = the ten bands).
+inline constexpr int sliderX(int i) {
+    return i == 0 ? kPreampX : kBandX0 + (i - 1) * kBandDX;
+}
+// y of a thumb for gain g in [-1, 1] (0 = flat, +1 = boost/top).
+inline constexpr int thumbY(double g) {
+    return kSliderTop + int((1.0 - g) / 2.0 * kSliderTravel);
+}
+}  // namespace eq
+
 }  // namespace pyrrha::coords
