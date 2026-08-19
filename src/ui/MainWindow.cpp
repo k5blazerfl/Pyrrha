@@ -14,8 +14,9 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include "engine/QtMultimediaEngine.h"
+#include "engine/QtAudioEngine.h"
 #include "player/Player.h"
+#include "sources/MetadataScanner.h"
 
 namespace pyrrha {
 
@@ -32,8 +33,9 @@ QString fmtTime(qint64 ms) {
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
-      m_engine(new QtMultimediaEngine(this)),
-      m_player(new Player(m_engine, this)) {
+      m_engine(new QtAudioEngine(this)),
+      m_player(new Player(m_engine, this)),
+      m_scanner(new MetadataScanner(this)) {
     setWindowTitle(QStringLiteral("Pyrrha"));
     resize(560, 480);
     buildUi();
@@ -128,6 +130,8 @@ void MainWindow::wireEngine() {
     connect(m_engine, &PlayerEngine::stateChanged, this,
             [this](PlayerEngine::State) { updatePlayPauseButton(); });
     connect(m_player, &Player::currentChanged, this, &MainWindow::setNowPlaying);
+    connect(m_scanner, &MetadataScanner::trackUpdated, this,
+            &MainWindow::onTrackUpdated);
 }
 
 void MainWindow::updatePlayPauseButton() {
@@ -152,15 +156,27 @@ void MainWindow::openFiles() {
     filter = filter.trimmed() + QStringLiteral(");;All files (*)");
     const QStringList paths = QFileDialog::getOpenFileNames(
         this, QStringLiteral("Open audio files"), {}, filter);
-    if (!paths.isEmpty() && m_source.addFiles(paths) > 0)
-        reloadQueue();
+    if (paths.isEmpty())
+        return;
+    const int before = m_source.tracks().size();
+    if (m_source.addFiles(paths) > 0)
+        addAndScan(before);
 }
 
 void MainWindow::openFolder() {
     const QString dir = QFileDialog::getExistingDirectory(
         this, QStringLiteral("Open music folder"));
-    if (!dir.isEmpty() && m_source.addFolder(dir) > 0)
-        reloadQueue();
+    if (dir.isEmpty())
+        return;
+    const int before = m_source.tracks().size();
+    if (m_source.addFolder(dir) > 0)
+        addAndScan(before);
+}
+
+void MainWindow::addAndScan(int firstNewIndex) {
+    reloadQueue();
+    // Read real tags for just the newly-added files; rows update as they arrive.
+    m_scanner->scan(m_source.tracks().mid(firstNewIndex), firstNewIndex);
 }
 
 void MainWindow::reloadQueue() {
@@ -168,7 +184,21 @@ void MainWindow::reloadQueue() {
     m_player->setQueue(tracks);
     m_playlist->clear();
     for (const Track &t : tracks)
-        m_playlist->addItem(t.displayTitle());
+        m_playlist->addItem(rowLabel(t));
+}
+
+void MainWindow::onTrackUpdated(int index, const Track &track) {
+    m_source.updateTrack(index, track);
+    m_player->updateTrack(index, track);  // refreshes now-playing if it's current
+    if (index >= 0 && index < m_playlist->count())
+        m_playlist->item(index)->setText(rowLabel(track));
+}
+
+QString MainWindow::rowLabel(const Track &t) {
+    QString label = t.displayTitle();
+    if (t.durationMs > 0)
+        label += QStringLiteral("   ·  %1").arg(fmtTime(t.durationMs));
+    return label;
 }
 
 }  // namespace pyrrha

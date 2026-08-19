@@ -15,6 +15,7 @@ namespace pyrrha {
 
 class Player;
 class PlayerEngine;
+class MetadataScanner;
 
 // The prototype main window: a playlist plus a transport bar (prev / play-pause /
 // next / stop, a seek slider with time labels, and a volume slider). Enough to
@@ -29,16 +30,20 @@ private slots:
     void openFiles();
     void openFolder();
     void reloadQueue();
+    void onTrackUpdated(int index, const Track &track);
 
 private:
     void buildUi();
     void wireEngine();
     void updatePlayPauseButton();
     void setNowPlaying(int index);
+    void addAndScan(int firstNewIndex);   // rebuild list, then probe new items
+    static QString rowLabel(const Track &track);
 
     LocalSource m_source;
-    PlayerEngine *m_engine;   // parented to this window
-    Player *m_player;         // parented to this window
+    PlayerEngine *m_engine;    // parented to this window
+    Player *m_player;          // parented to this window
+    MetadataScanner *m_scanner;  // parented to this window
 
     QListWidget *m_playlist = nullptr;
     QPushButton *m_playPause = nullptr;

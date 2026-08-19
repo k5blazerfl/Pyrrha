@@ -22,15 +22,16 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
 
 add_executable(pyrrha
     src/main.cpp
-    src/engine/QtMultimediaEngine.cpp
+    src/engine/QtAudioEngine.cpp
     src/sources/LocalSource.cpp
+    src/sources/MetadataScanner.cpp
     src/player/Player.cpp
     src/ui/MainWindow.cpp
     # Q_OBJECT headers listed so AUTOMOC processes them. PlayerEngine.h is
     # header-only (an abstract base with signals) and has no .cpp, so without
     # this its moc — vtable, staticMetaObject, signal emitters — is never built.
     src/engine/PlayerEngine.h
-    src/engine/QtMultimediaEngine.h
+    src/engine/QtAudioEngine.h
     src/player/Player.h
     src/ui/MainWindow.h
 )
