@@ -1,0 +1,7 @@
+/build/
+*.o
+*.moc
+moc_*.cpp
+*.user
+compile_commands.json
+.cache/
