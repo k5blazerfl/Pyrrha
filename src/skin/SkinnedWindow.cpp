@@ -2,8 +2,10 @@
 // Copyright (C) 2026 the Pyrrha authors
 #include "skin/SkinnedWindow.h"
 
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QWindow>
 
 namespace pyrrha {
 
@@ -64,10 +66,14 @@ void SkinnedWindow::paintEvent(QPaintEvent *) {
                 m_skin.sprite(QStringLiteral("titlebar.bmp"), kTitlebarSrcX,
                               kTitlebarActiveY, kTitlebarW, kTitlebarH));
 
-    for (const Button &b : kButtons)
+    constexpr int nButtons = int(sizeof(kButtons) / sizeof(kButtons[0]));
+    for (int i = 0; i < nButtons; ++i) {
+        const Button &b = kButtons[i];
+        const int sy = (i == m_pressedButton) ? b.sy1 : b.sy0;  // pressed state
         p.drawImage(b.dx, b.dy,
-                    m_skin.sprite(QStringLiteral("cbuttons.bmp"), b.sx, b.sy0,
-                                  b.w, b.h));
+                    m_skin.sprite(QStringLiteral("cbuttons.bmp"), b.sx, sy, b.w,
+                                  b.h));
+    }
 
     p.drawImage(kStatusX, kStatusY,
                 m_skin.sprite(QStringLiteral("playpaus.bmp"), m_playing ? 0 : 9,
@@ -105,6 +111,113 @@ void SkinnedWindow::drawTime(QPainter &p) const {
                           .arg(ss, 2, 10, QLatin1Char('0'));
     for (int i = 0; i < 4 && i < d.size(); ++i)
         p.drawImage(kTimeX[i], kTimeY, m_num->digit(d[i]));
+}
+
+// -- interaction ------------------------------------------------------------
+
+int SkinnedWindow::transportButtonAt(const QPoint &pt) const {
+    constexpr int n = int(sizeof(coords::kButtons) / sizeof(coords::kButtons[0]));
+    for (int i = 0; i < n; ++i)
+        if (coords::buttonRect(coords::kButtons[i]).contains(pt.x(), pt.y()))
+            return i;
+    return -1;
+}
+
+void SkinnedWindow::updateSliderFromX(int x) {
+    using namespace coords;
+    switch (m_drag) {
+        case Drag::Volume: {
+            setVolume(qreal(x - kVolumeX) / kVolumeW);
+            emit volumeChanged(m_volume);
+            break;
+        }
+        case Drag::Balance: {
+            qreal bal = qreal(x - kBalanceX) / kBalanceW * 2.0 - 1.0;
+            if (qAbs(bal) < kBalSnap)
+                bal = 0.0;  // snap to centre
+            setBalance(bal);
+            emit balanceChanged(m_balance);
+            break;
+        }
+        case Drag::Seek: {
+            const qreal frac = qBound(0.0, qreal(x - kPosbarX) / kPosbarW, 1.0);
+            emit seekRequested(frac);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void SkinnedWindow::mousePressEvent(QMouseEvent *e) {
+    if (e->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(e);
+        return;
+    }
+    using namespace coords;
+    const QPoint pt = e->position().toPoint();
+
+    if (kMenuBtn.contains(pt.x(), pt.y())) { emit menuClicked(); return; }
+    if (kMinimizeBtn.contains(pt.x(), pt.y())) { emit minimizeClicked(); return; }
+    if (kShadeBtn.contains(pt.x(), pt.y())) { emit shadeClicked(); return; }
+    if (kCloseBtn.contains(pt.x(), pt.y())) { emit closeClicked(); return; }
+
+    const int btn = transportButtonAt(pt);
+    if (btn >= 0) {
+        m_pressedButton = btn;
+        update();
+        return;
+    }
+
+    if (Rect{kVolumeX, kVolumeY, kVolumeW, kVolumeH}.contains(pt.x(), pt.y())) {
+        m_drag = Drag::Volume;
+        updateSliderFromX(pt.x());
+        return;
+    }
+    if (Rect{kBalanceX, kBalanceY, kBalanceW, kBalanceH}.contains(pt.x(), pt.y())) {
+        m_drag = Drag::Balance;
+        updateSliderFromX(pt.x());
+        return;
+    }
+    if (Rect{kPosbarX, kPosbarY, kPosbarW, kPosbarH}.contains(pt.x(), pt.y())) {
+        m_drag = Drag::Seek;
+        updateSliderFromX(pt.x());
+        return;
+    }
+
+    // Otherwise a click on the titlebar/body drags the frameless window — hand
+    // off to the compositor (the Wayland-correct way to move a top-level).
+    if (pt.y() < kTitlebarDragH && windowHandle()) {
+        windowHandle()->startSystemMove();
+        return;
+    }
+    QWidget::mousePressEvent(e);
+}
+
+void SkinnedWindow::mouseMoveEvent(QMouseEvent *e) {
+    if (m_drag == Drag::Seek || m_drag == Drag::Volume || m_drag == Drag::Balance)
+        updateSliderFromX(e->position().toPoint().x());
+    else
+        QWidget::mouseMoveEvent(e);
+}
+
+void SkinnedWindow::mouseReleaseEvent(QMouseEvent *e) {
+    if (e->button() == Qt::LeftButton && m_pressedButton >= 0) {
+        if (transportButtonAt(e->position().toPoint()) == m_pressedButton) {
+            switch (m_pressedButton) {
+                case 0: emit prevClicked(); break;
+                case 1: emit playClicked(); break;
+                case 2: emit pauseClicked(); break;
+                case 3: emit stopClicked(); break;
+                case 4: emit nextClicked(); break;
+                case 5: emit ejectClicked(); break;
+            }
+        }
+        m_pressedButton = -1;
+        update();
+    }
+    m_drag = Drag::None;
+    QWidget::mouseReleaseEvent(e);
 }
 
 }  // namespace pyrrha

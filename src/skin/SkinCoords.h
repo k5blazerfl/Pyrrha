@@ -67,4 +67,27 @@ inline constexpr int kPosbarThumbW = 29;
 inline constexpr int kStatusX = 26;
 inline constexpr int kStatusY = 28;
 
+// A hit-testable rectangle.
+struct Rect {
+    int x, y, w, h;
+    constexpr bool contains(int px, int py) const {
+        return px >= x && py >= y && px < x + w && py < y + h;
+    }
+};
+
+// Titlebar buttons (dest rects; glyphs are baked into titlebar.bmp).
+inline constexpr Rect kMenuBtn{6, 3, 9, 9};
+inline constexpr Rect kMinimizeBtn{244, 3, 9, 9};
+inline constexpr Rect kShadeBtn{254, 3, 9, 9};
+inline constexpr Rect kCloseBtn{264, 3, 9, 9};
+
+// Slider drag geometry.
+inline constexpr int kVolHandleW = 14;
+inline constexpr int kBalHandleW = 14;
+inline constexpr double kBalSnap = 0.08;   // centre dead-zone
+inline constexpr int kTitlebarDragH = 14;  // top strip that moves the window
+
+// Transport button hit-rect (its destination rect).
+inline constexpr Rect buttonRect(const Button &b) { return {b.dx, b.dy, b.w, b.h}; }
+
 }  // namespace pyrrha::coords

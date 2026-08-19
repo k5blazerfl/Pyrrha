@@ -35,11 +35,39 @@ public:
 
     QSize sizeHint() const override { return {coords::kW, coords::kH}; }
 
+signals:
+    // Transport (the six cbuttons.bmp buttons).
+    void prevClicked();
+    void playClicked();
+    void pauseClicked();
+    void stopClicked();
+    void nextClicked();
+    void ejectClicked();
+    // Titlebar.
+    void menuClicked();
+    void minimizeClicked();
+    void shadeClicked();
+    void closeClicked();
+    // Sliders (user-driven).
+    void seekRequested(qreal fraction);   // 0..1 of the track
+    void volumeChanged(qreal v);          // 0..1
+    void balanceChanged(qreal b);         // -1..1
+
 protected:
     void paintEvent(QPaintEvent *) override;
+    void mousePressEvent(QMouseEvent *) override;
+    void mouseMoveEvent(QMouseEvent *) override;
+    void mouseReleaseEvent(QMouseEvent *) override;
 
 private:
+    enum class Drag { None, Window, Seek, Volume, Balance };
+
     void drawTime(QPainter &p) const;
+    int transportButtonAt(const QPoint &pt) const;  // index into kButtons, or -1
+    void updateSliderFromX(int x);                    // drives the active drag
+
+    Drag m_drag = Drag::None;
+    int m_pressedButton = -1;   // transport button held down, or -1
 
     Skin m_skin;
     std::optional<TextFont> m_text;

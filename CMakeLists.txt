@@ -17,7 +17,7 @@ endif()
 
 # Native Qt6 — the same stack as the HeDE shell (Widgets, no QML). Audio via
 # Qt6::Multimedia (QAudioDecoder + QAudioSink); DBus for MPRIS2 media integration.
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia DBus)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia DBus Test)
 # TagLib reads audio tags for every common format (incl. Ogg/Opus, which
 # QMediaMetaData can't) — pure C++, no GLib.
 find_package(taglib REQUIRED)
@@ -73,3 +73,14 @@ add_executable(test_skin
 target_include_directories(test_skin PRIVATE src)
 target_link_libraries(test_skin PRIVATE Qt6::Gui KF6::Archive)
 add_test(NAME skin COMMAND test_skin)
+
+# The skinned main window's interaction — synthetic mouse events → signals.
+add_executable(test_skinnedwindow
+    tests/test_skinnedwindow.cpp
+    src/skin/Skin.cpp
+    src/skin/BitmapFont.cpp
+    src/skin/SkinnedWindow.cpp)
+target_include_directories(test_skinnedwindow PRIVATE src)
+target_link_libraries(test_skinnedwindow PRIVATE Qt6::Widgets Qt6::Test KF6::Archive)
+add_test(NAME skinnedwindow COMMAND test_skinnedwindow)
+set_tests_properties(skinnedwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
