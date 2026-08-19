@@ -22,12 +22,16 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
 # TagLib reads audio tags for every common format (incl. Ogg/Opus, which
 # QMediaMetaData can't) — pure C++, no GLib.
 find_package(taglib REQUIRED)
+# KArchive (KF6) reads .wsz skin archives (ZIP) — Qt6-native, minimal deps.
+find_package(KF6Archive REQUIRED)
 
 add_executable(pyrrha
     src/main.cpp
     src/engine/QtAudioEngine.cpp
     src/sources/LocalSource.cpp
     src/sources/MetadataScanner.cpp
+    src/skin/Skin.cpp
+    src/skin/BitmapFont.cpp
     src/player/Player.cpp
     src/ui/MainWindow.cpp
     # Q_OBJECT headers listed so AUTOMOC processes them. PlayerEngine.h is
@@ -39,7 +43,17 @@ add_executable(pyrrha
     src/ui/MainWindow.h
 )
 target_include_directories(pyrrha PRIVATE src)
-target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia TagLib::tag)
+target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia TagLib::tag KF6::Archive)
 target_compile_options(pyrrha PRIVATE -Wall -Wextra)
 
 install(TARGETS pyrrha RUNTIME DESTINATION bin)
+
+# -- tests ------------------------------------------------------------------
+enable_testing()
+add_executable(test_skin
+    tests/test_skin.cpp
+    src/skin/Skin.cpp
+    src/skin/BitmapFont.cpp)
+target_include_directories(test_skin PRIVATE src)
+target_link_libraries(test_skin PRIVATE Qt6::Gui KF6::Archive)
+add_test(NAME skin COMMAND test_skin)
