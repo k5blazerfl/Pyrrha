@@ -19,6 +19,9 @@ endif()
 # from Qt6::Multimedia; the engine is isolated behind PlayerEngine so a
 # GStreamer backend can be dropped in later for gapless / ReplayGain / EQ.
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
+# TagLib reads audio tags for every common format (incl. Ogg/Opus, which
+# QMediaMetaData can't) — pure C++, no GLib.
+find_package(taglib REQUIRED)
 
 add_executable(pyrrha
     src/main.cpp
@@ -36,7 +39,7 @@ add_executable(pyrrha
     src/ui/MainWindow.h
 )
 target_include_directories(pyrrha PRIVATE src)
-target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia)
+target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia TagLib::tag)
 target_compile_options(pyrrha PRIVATE -Wall -Wextra)
 
 install(TARGETS pyrrha RUNTIME DESTINATION bin)
