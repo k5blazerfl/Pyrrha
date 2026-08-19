@@ -5,15 +5,16 @@
 #include <QAudioBuffer>
 #include <QAudioDecoder>
 #include <QAudioSink>
-#include <QBuffer>
 #include <QMediaDevices>
 #include <QTimer>
+
+#include "engine/StreamBuffer.h"
 
 namespace pyrrha {
 
 QtAudioEngine::QtAudioEngine(QObject *parent)
     : PlayerEngine(parent), m_decoder(new QAudioDecoder(this)),
-      m_posTimer(new QTimer(this)) {
+      m_stream(new StreamBuffer(this)), m_posTimer(new QTimer(this)) {
     connect(m_decoder, &QAudioDecoder::bufferReady, this,
             &QtAudioEngine::onBufferReady);
     connect(m_decoder, &QAudioDecoder::finished, this,
@@ -21,8 +22,10 @@ QtAudioEngine::QtAudioEngine(QObject *parent)
     connect(m_decoder, &QAudioDecoder::durationChanged, this,
             [this](qint64 ms) { emit durationChanged(ms); });
     connect(m_decoder, qOverload<QAudioDecoder::Error>(&QAudioDecoder::error),
-            this,
-            [this](QAudioDecoder::Error) { emit error(m_decoder->errorString()); });
+            this, [this](QAudioDecoder::Error) {
+                m_stream->setFinished();  // let the sink drain and end cleanly
+                emit error(m_decoder->errorString());
+            });
 
     m_posTimer->setInterval(200);
     connect(m_posTimer, &QTimer::timeout, this,
@@ -33,21 +36,18 @@ QtAudioEngine::~QtAudioEngine() { teardownSink(); }
 
 void QtAudioEngine::load(const QUrl &url) {
     teardownSink();
-    m_pcm.clear();
-    m_ready = false;
-    m_playRequested = false;
     setState(State::Stopped);
+    m_playRequested = false;
 
-    // Decode straight to the output device's preferred format, so the sink is
-    // guaranteed to accept it (no resampling dance, no format-mismatch failure).
-    // Fall back to a standard CD format when there is no output device yet (e.g.
-    // a headless run) so decoding — and duration/position — still work.
+    // Decode to the output device's preferred format so the sink accepts it;
+    // fall back to a standard CD format when there's no device (headless).
     m_format = QMediaDevices::defaultAudioOutput().preferredFormat();
     if (!m_format.isValid()) {
         m_format.setSampleRate(44100);
         m_format.setChannelCount(2);
         m_format.setSampleFormat(QAudioFormat::Int16);
     }
+    m_stream->start(/*seekable=*/true);  // a local file: keep all, seeking works
     m_decoder->stop();
     m_decoder->setAudioFormat(m_format);
     m_decoder->setSource(url);
@@ -57,16 +57,14 @@ void QtAudioEngine::load(const QUrl &url) {
 void QtAudioEngine::onBufferReady() {
     const QAudioBuffer buf = m_decoder->read();
     if (buf.isValid())
-        m_pcm.append(buf.constData<char>(), buf.byteCount());
+        m_stream->appendPcm(buf.constData<char>(), buf.byteCount());
+    maybeStartSink();  // begin playback as soon as the first audio is in
 }
 
 void QtAudioEngine::onDecodeFinished() {
-    m_ready = true;
+    m_stream->setFinished();
     emit durationChanged(duration());
-    if (m_playRequested) {
-        m_playRequested = false;
-        startSink();
-    }
+    maybeStartSink();  // a very short clip: data + finished can arrive together
 }
 
 void QtAudioEngine::play() {
@@ -76,10 +74,14 @@ void QtAudioEngine::play() {
         setState(State::Playing);
         return;
     }
-    if (m_ready)
+    m_playRequested = true;
+    maybeStartSink();
+}
+
+void QtAudioEngine::maybeStartSink() {
+    if (m_playRequested && !m_sink && m_format.isValid() &&
+        (m_stream->buffered() > 0 || m_stream->finished()))
         startSink();
-    else
-        m_playRequested = true;  // decoding still running — start when it finishes
 }
 
 void QtAudioEngine::pause() {
@@ -98,28 +100,24 @@ void QtAudioEngine::stop() {
 
 void QtAudioEngine::startSink() {
     teardownSink();
-    if (!m_format.isValid() || m_pcm.isEmpty())
-        return;
     if (QMediaDevices::defaultAudioOutput().isNull()) {
         emit error(QStringLiteral("No audio output device available."));
         return;
     }
-
-    m_pcmDevice = new QBuffer(&m_pcm, this);
-    m_pcmDevice->open(QIODevice::ReadOnly);
-
+    m_playRequested = false;
     m_sink = new QAudioSink(m_format, this);
     m_sink->setVolume(m_volume);
     connect(m_sink, &QAudioSink::stateChanged, this, [this](QAudio::State s) {
-        // The buffer running dry at end-of-track lands the sink in IdleState;
-        // guard on Playing so we report the end exactly once.
-        if (s == QAudio::IdleState && m_pcmDevice && m_pcmDevice->atEnd() &&
+        // The buffer only returns 0 (→ IdleState) at true end-of-stream; an
+        // underrun is padded with silence and stays Active. Guard on Playing so
+        // we report the end exactly once.
+        if (s == QAudio::IdleState && m_stream->atEnd() &&
             m_state == State::Playing) {
             setState(State::Stopped);
             emit trackEnded();
         }
     });
-    m_sink->start(m_pcmDevice);
+    m_sink->start(m_stream);  // pull mode: the sink reads from the StreamBuffer
     m_posTimer->start();
     setState(State::Playing);
 }
@@ -131,24 +129,14 @@ void QtAudioEngine::teardownSink() {
         m_sink->deleteLater();
         m_sink = nullptr;
     }
-    if (m_pcmDevice) {
-        m_pcmDevice->close();
-        m_pcmDevice->deleteLater();
-        m_pcmDevice = nullptr;
-    }
 }
 
 void QtAudioEngine::seek(qint64 ms) {
-    if (!m_pcmDevice || !m_format.isValid())
+    if (!m_format.isValid())
         return;
-    const qint64 want = m_format.bytesForDuration(ms * 1000);
-    const qint64 maxBytes = static_cast<qint64>(m_pcm.size());
-    qint64 bytes = qBound<qint64>(0, want, maxBytes);
-    const int frame = m_format.bytesPerFrame();
-    if (frame > 0)
-        bytes -= bytes % frame;  // align to a sample-frame boundary
-    m_pcmDevice->seek(bytes);
-    emit positionChanged(position());
+    const qint64 bytes = m_format.bytesForDuration(ms * 1000);
+    if (m_stream->seekToByte(bytes))
+        emit positionChanged(position());
 }
 
 void QtAudioEngine::setVolume(qreal volume) {
@@ -158,14 +146,14 @@ void QtAudioEngine::setVolume(qreal volume) {
 }
 
 qint64 QtAudioEngine::position() const {
-    if (!m_pcmDevice || !m_format.isValid())
+    if (!m_format.isValid())
         return 0;
-    return m_format.durationForBytes(m_pcmDevice->pos()) / 1000;
+    return m_format.durationForBytes(m_stream->consumed()) / 1000;
 }
 
 qint64 QtAudioEngine::duration() const {
-    if (m_ready && m_format.isValid())
-        return m_format.durationForBytes(m_pcm.size()) / 1000;
+    if (m_stream->finished() && m_format.isValid())
+        return m_format.durationForBytes(m_stream->totalWritten()) / 1000;
     return m_decoder ? m_decoder->duration() : 0;
 }
 
