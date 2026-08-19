@@ -26,6 +26,7 @@ find_package(taglib REQUIRED)
 add_executable(pyrrha
     src/main.cpp
     src/engine/QtAudioEngine.cpp
+    src/engine/StreamBuffer.cpp
     src/sources/LocalSource.cpp
     src/sources/MetadataScanner.cpp
     src/mpris/MprisAdapter.cpp
@@ -44,3 +45,16 @@ target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::DBus TagL
 target_compile_options(pyrrha PRIVATE -Wall -Wextra)
 
 install(TARGETS pyrrha RUNTIME DESTINATION bin)
+
+# -- tests ------------------------------------------------------------------
+# StreamBuffer is the streaming engine's testable core (the sink integration
+# itself needs real audio hardware). Run with: ctest --test-dir build
+enable_testing()
+add_executable(test_streambuffer
+    tests/test_streambuffer.cpp
+    src/engine/StreamBuffer.cpp
+    src/engine/StreamBuffer.h
+)
+target_include_directories(test_streambuffer PRIVATE src)
+target_link_libraries(test_streambuffer PRIVATE Qt6::Core)
+add_test(NAME streambuffer COMMAND test_streambuffer)
