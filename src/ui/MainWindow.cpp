@@ -15,6 +15,7 @@
 #include <QWidget>
 
 #include "engine/QtAudioEngine.h"
+#include "mpris/MprisAdapter.h"
 #include "player/Player.h"
 #include "sources/MetadataScanner.h"
 
@@ -35,12 +36,23 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_engine(new QtAudioEngine(this)),
       m_player(new Player(m_engine, this)),
-      m_scanner(new MetadataScanner(this)) {
+      m_scanner(new MetadataScanner(this)),
+      m_mpris(new MprisAdapter(m_player, this)) {
     setWindowTitle(QStringLiteral("Pyrrha"));
     resize(560, 480);
     buildUi();
     wireEngine();
     m_player->setVolume(m_volume->value() / 100.0);
+
+    // Desktop media integration: media keys + now-playing in the shell. Harmless
+    // no-op when there's no session bus.
+    m_mpris->registerOnBus();
+    connect(m_mpris, &MprisAdapter::raiseRequested, this, [this] {
+        showNormal();
+        raise();
+        activateWindow();
+    });
+    connect(m_mpris, &MprisAdapter::quitRequested, this, &QWidget::close);
 }
 
 void MainWindow::buildUi() {

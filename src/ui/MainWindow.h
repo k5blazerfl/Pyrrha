@@ -16,6 +16,7 @@ namespace pyrrha {
 class Player;
 class PlayerEngine;
 class MetadataScanner;
+class MprisAdapter;
 
 // The prototype main window: a playlist plus a transport bar (prev / play-pause /
 // next / stop, a seek slider with time labels, and a volume slider). Enough to
@@ -44,6 +45,7 @@ private:
     PlayerEngine *m_engine;    // parented to this window
     Player *m_player;          // parented to this window
     MetadataScanner *m_scanner;  // parented to this window
+    MprisAdapter *m_mpris;       // desktop media integration (parented to window)
 
     QListWidget *m_playlist = nullptr;
     QPushButton *m_playPause = nullptr;
