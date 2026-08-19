@@ -34,6 +34,7 @@ add_executable(pyrrha
     src/skin/BitmapFont.cpp
     src/skin/SkinnedWindow.cpp
     src/skin/SkinnedEqWindow.cpp
+    src/skin/SkinnedPlaylistWindow.cpp
     src/mpris/MprisAdapter.cpp
     src/player/Player.cpp
     src/ui/MainWindow.cpp
