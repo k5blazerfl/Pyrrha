@@ -17,6 +17,14 @@ void Player::setQueue(const QVector<Track> &tracks) {
     emit currentChanged(m_index);
 }
 
+void Player::updateTrack(int index, const Track &track) {
+    if (index < 0 || index >= m_queue.size())
+        return;
+    m_queue[index] = track;
+    if (index == m_index)
+        emit currentChanged(m_index);  // refresh now-playing with real tags
+}
+
 const Track *Player::current() const {
     return (m_index >= 0 && m_index < m_queue.size()) ? &m_queue[m_index]
                                                       : nullptr;

@@ -26,6 +26,12 @@ public:
 
     void clear() { m_tracks.clear(); }
 
+    // Replace a track (used by the metadata scanner to fill in real tags).
+    void updateTrack(int index, const Track &track) {
+        if (index >= 0 && index < m_tracks.size())
+            m_tracks[index] = track;
+    }
+
     // The audio file extensions we accept (lower-case, no dot).
     static const QStringList &audioExtensions();
 

@@ -23,6 +23,10 @@ public:
     void setQueue(const QVector<Track> &tracks);
     const QVector<Track> &queue() const { return m_queue; }
 
+    // Replace one queue entry in place (e.g. when its tags arrive). If it's the
+    // current track, currentChanged is re-emitted so the UI refreshes.
+    void updateTrack(int index, const Track &track);
+
     void playIndex(int index);       // load + play the queue item at index
     void togglePlayPause();
     void next();

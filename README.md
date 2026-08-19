@@ -30,7 +30,8 @@ cmake --build build -j
 ./build/pyrrha
 ```
 
-Requires Qt6 Widgets + Multimedia (`dev-qt/qtbase[widgets]`, `dev-qt/qtmultimedia`).
+Requires Qt6 Widgets + Multimedia and TagLib
+(`dev-qt/qtbase[widgets]`, `dev-qt/qtmultimedia`, `media-libs/taglib`).
 
 ## License
 
