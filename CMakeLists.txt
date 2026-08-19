@@ -18,7 +18,7 @@ endif()
 # Native Qt6 — the same stack as the HeDE shell (Widgets, no QML). Audio comes
 # from Qt6::Multimedia; the engine is isolated behind PlayerEngine so a
 # GStreamer backend can be dropped in later for gapless / ReplayGain / EQ.
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia DBus)
 # TagLib reads audio tags for every common format (incl. Ogg/Opus, which
 # QMediaMetaData can't) — pure C++, no GLib.
 find_package(taglib REQUIRED)
@@ -28,6 +28,7 @@ add_executable(pyrrha
     src/engine/QtAudioEngine.cpp
     src/sources/LocalSource.cpp
     src/sources/MetadataScanner.cpp
+    src/mpris/MprisAdapter.cpp
     src/player/Player.cpp
     src/ui/MainWindow.cpp
     # Q_OBJECT headers listed so AUTOMOC processes them. PlayerEngine.h is
@@ -39,7 +40,7 @@ add_executable(pyrrha
     src/ui/MainWindow.h
 )
 target_include_directories(pyrrha PRIVATE src)
-target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia TagLib::tag)
+target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::DBus TagLib::tag)
 target_compile_options(pyrrha PRIVATE -Wall -Wextra)
 
 install(TARGETS pyrrha RUNTIME DESTINATION bin)

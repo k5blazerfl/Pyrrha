@@ -91,7 +91,15 @@ void Player::stop() {
     emit currentChanged(m_index);
 }
 
-void Player::seek(qint64 ms) { m_engine->seek(ms); }
-void Player::setVolume(qreal volume) { m_engine->setVolume(volume); }
+void Player::seek(qint64 ms) {
+    m_engine->seek(ms);
+    emit seeked(ms);
+}
+
+void Player::setVolume(qreal volume) {
+    m_volume = volume;
+    m_engine->setVolume(volume);
+    emit volumeChanged(m_volume);
+}
 
 }  // namespace pyrrha

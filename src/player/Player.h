@@ -37,11 +37,14 @@ public:
 
     int currentIndex() const { return m_index; }
     const Track *current() const;    // nullptr when nothing is loaded
+    qreal volume() const { return m_volume; }
     PlayerEngine *engine() const { return m_engine; }
 
 signals:
     void currentChanged(int index);  // -1 when the queue emptied / stopped
     void queueChanged();
+    void seeked(qint64 ms);          // a discontinuous position change (a seek)
+    void volumeChanged(qreal volume);
 
 private:
     void loadAndPlay(int index);
@@ -49,6 +52,7 @@ private:
     PlayerEngine *m_engine;
     QVector<Track> m_queue;
     int m_index = -1;
+    qreal m_volume = 0.8;
 };
 
 }  // namespace pyrrha
