@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(pyrrha
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "A HeDE-native skinnable music player"
     LANGUAGES CXX)
 
@@ -15,13 +15,14 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Native Qt6 — the same stack as the HeDE shell (Widgets, no QML). Audio comes
-# from Qt6::Multimedia; the engine is isolated behind PlayerEngine so a
-# GStreamer backend can be dropped in later for gapless / ReplayGain / EQ.
+# Native Qt6 — the same stack as the HeDE shell (Widgets, no QML). Audio via
+# Qt6::Multimedia (QAudioDecoder + QAudioSink); DBus for MPRIS2 media integration.
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia DBus)
 # TagLib reads audio tags for every common format (incl. Ogg/Opus, which
 # QMediaMetaData can't) — pure C++, no GLib.
 find_package(taglib REQUIRED)
+# KArchive (KF6) reads .wsz skin archives (ZIP) — Qt6-native, minimal deps.
+find_package(KF6Archive REQUIRED)
 
 add_executable(pyrrha
     src/main.cpp
@@ -29,6 +30,8 @@ add_executable(pyrrha
     src/engine/StreamBuffer.cpp
     src/sources/LocalSource.cpp
     src/sources/MetadataScanner.cpp
+    src/skin/Skin.cpp
+    src/skin/BitmapFont.cpp
     src/mpris/MprisAdapter.cpp
     src/player/Player.cpp
     src/ui/MainWindow.cpp
@@ -41,20 +44,31 @@ add_executable(pyrrha
     src/ui/MainWindow.h
 )
 target_include_directories(pyrrha PRIVATE src)
-target_link_libraries(pyrrha PRIVATE Qt6::Widgets Qt6::Multimedia Qt6::DBus TagLib::tag)
+target_link_libraries(pyrrha PRIVATE
+    Qt6::Widgets Qt6::Multimedia Qt6::DBus TagLib::tag KF6::Archive)
 target_compile_options(pyrrha PRIVATE -Wall -Wextra)
 
 install(TARGETS pyrrha RUNTIME DESTINATION bin)
 
 # -- tests ------------------------------------------------------------------
-# StreamBuffer is the streaming engine's testable core (the sink integration
-# itself needs real audio hardware). Run with: ctest --test-dir build
+# Run with: ctest --test-dir build
 enable_testing()
+
+# StreamBuffer is the streaming engine's testable core (the sink integration
+# itself needs real audio hardware).
 add_executable(test_streambuffer
     tests/test_streambuffer.cpp
     src/engine/StreamBuffer.cpp
-    src/engine/StreamBuffer.h
-)
+    src/engine/StreamBuffer.h)
 target_include_directories(test_streambuffer PRIVATE src)
 target_link_libraries(test_streambuffer PRIVATE Qt6::Core)
 add_test(NAME streambuffer COMMAND test_streambuffer)
+
+# Skin loader + bitmap fonts, verified against the real py-pyrrha test skins.
+add_executable(test_skin
+    tests/test_skin.cpp
+    src/skin/Skin.cpp
+    src/skin/BitmapFont.cpp)
+target_include_directories(test_skin PRIVATE src)
+target_link_libraries(test_skin PRIVATE Qt6::Gui KF6::Archive)
+add_test(NAME skin COMMAND test_skin)
