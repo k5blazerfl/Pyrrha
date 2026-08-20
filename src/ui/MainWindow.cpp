@@ -18,8 +18,7 @@
 #include "mpris/MprisAdapter.h"
 #include "player/Player.h"
 #include "sources/MetadataScanner.h"
-#include "skin/SkinnedWindow.h"
-#include "ui/ClassicController.h"
+#include "ui/SkinnedShell.h"
 
 namespace pyrrha {
 
@@ -217,14 +216,10 @@ void MainWindow::openClassicSkin() {
         QStringLiteral("Winamp skins (*.wsz *.zip);;All files (*)"));
     if (path.isEmpty())
         return;
-    if (!m_classic) {
-        m_classic = new SkinnedWindow();  // a top-level classic window
-        new ClassicController(m_classic, m_player, m_classic);
-    }
-    if (m_classic->loadSkin(path)) {
-        m_classic->show();
-        m_classic->raise();
-    }
+    if (!m_shell)
+        m_shell = new SkinnedShell(m_player, this);
+    if (m_shell->loadSkin(path))
+        m_shell->show();
 }
 
 QString MainWindow::rowLabel(const Track &t) {

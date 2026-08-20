@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(pyrrha
-    VERSION 0.4.0
+    VERSION 0.5.0
     DESCRIPTION "A HeDE-native skinnable music player"
     LANGUAGES CXX)
 
@@ -39,6 +39,7 @@ add_executable(pyrrha
     src/player/Player.cpp
     src/ui/MainWindow.cpp
     src/ui/ClassicController.cpp
+    src/ui/SkinnedShell.cpp
     # Q_OBJECT headers listed so AUTOMOC processes them. PlayerEngine.h is
     # header-only (an abstract base with signals) and has no .cpp, so without
     # this its moc — vtable, staticMetaObject, signal emitters — is never built.
@@ -104,3 +105,23 @@ target_link_libraries(test_classic PRIVATE
     Qt6::Widgets Qt6::Multimedia Qt6::Test KF6::Archive)
 add_test(NAME classic COMMAND test_classic)
 set_tests_properties(classic PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# SkinnedShell: hosts the three windows, toggles + playlist mirroring.
+add_executable(test_shell
+    tests/test_shell.cpp
+    src/ui/SkinnedShell.cpp
+    src/ui/ClassicController.cpp
+    src/skin/Skin.cpp
+    src/skin/BitmapFont.cpp
+    src/skin/SkinnedWindow.cpp
+    src/skin/SkinnedEqWindow.cpp
+    src/skin/SkinnedPlaylistWindow.cpp
+    src/player/Player.cpp
+    src/engine/QtAudioEngine.cpp
+    src/engine/StreamBuffer.cpp
+    src/engine/PlayerEngine.h)
+target_include_directories(test_shell PRIVATE src)
+target_link_libraries(test_shell PRIVATE
+    Qt6::Widgets Qt6::Multimedia Qt6::Test KF6::Archive)
+add_test(NAME shell COMMAND test_shell)
+set_tests_properties(shell PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

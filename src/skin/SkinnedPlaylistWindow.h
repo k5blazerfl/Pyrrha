@@ -8,6 +8,8 @@
 // drag-reorder and the miniplayer clock grow on top.
 #pragma once
 
+#include <memory>
+
 #include <QColor>
 #include <QStringList>
 #include <QWidget>
@@ -23,20 +25,30 @@ public:
     explicit SkinnedPlaylistWindow(QWidget *parent = nullptr);
 
     bool loadSkin(const QString &path);
-    bool hasSkin() const { return m_skin.isValid(); }
+    void setSkin(std::shared_ptr<Skin> skin);   // adopt an already-parsed Skin (shared)
+    bool hasSkin() const { return m_skin && m_skin->isValid(); }
 
     void setRows(const QStringList &titles, const QStringList &durations);
     void setCurrentRow(int i);
+    int rowCount() const { return int(m_titles.size()); }
+    int currentRow() const { return m_current; }
 
     QSize sizeHint() const override {
         return {coords::pl::kDefaultW, coords::pl::kDefaultH};
     }
 
+    int selectedRow() const { return m_selected; }
+
 signals:
     void closeClicked();
+    void rowActivated(int index);   // a row was double-clicked (play it)
+    void rowSelected(int index);    // a row was single-clicked (highlight it)
 
 protected:
     void paintEvent(QPaintEvent *) override;
+    void mousePressEvent(QMouseEvent *) override;
+    void mouseDoubleClickEvent(QMouseEvent *) override;
+    void wheelEvent(QWheelEvent *) override;
 
 private:
     void parseColors();
@@ -44,10 +56,15 @@ private:
     void blitFrame(QPainter &p, int w, int lh);
     void drawRows(QPainter &p, int w, int lh);
 
-    Skin m_skin;
+    int rowAt(const QPoint &pt) const;   // queue index under pt, or -1
+    int visibleRows() const;             // rows that fit in the list area
+    void clampScroll();                  // keep m_scroll in range
+
+    std::shared_ptr<Skin> m_skin;
     QStringList m_titles;
     QStringList m_durations;
-    int m_current = -1;
+    int m_current = -1;    // the playing row (from the player)
+    int m_selected = -1;   // the user-selected row (single click)
     int m_scroll = 0;
 
     // pledit.txt colours (Winamp defaults: green on black).

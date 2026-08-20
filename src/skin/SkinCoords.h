@@ -90,6 +90,10 @@ inline constexpr int kTitlebarDragH = 14;  // top strip that moves the window
 // Transport button hit-rect (its destination rect).
 inline constexpr Rect buttonRect(const Button &b) { return {b.dx, b.dy, b.w, b.h}; }
 
+// shufrep.bmp EQ / playlist toggle buttons (show/hide those windows).
+inline constexpr Rect kEqToggle{219, 58, 23, 12};
+inline constexpr Rect kPlToggle{242, 58, 23, 12};
+
 // -- equalizer window (eqmain.bmp / eq_ex.bmp, 275×116) ---------------------
 namespace eq {
 inline constexpr int kW = 275;

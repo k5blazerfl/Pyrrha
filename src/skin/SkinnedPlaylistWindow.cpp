@@ -3,8 +3,12 @@
 #include "skin/SkinnedPlaylistWindow.h"
 
 #include <QFont>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QWheelEvent>
+
+#include <algorithm>
 
 namespace pyrrha {
 
@@ -27,7 +31,7 @@ SkinnedPlaylistWindow::SkinnedPlaylistWindow(QWidget *parent) : QWidget(parent) 
 }
 
 void SkinnedPlaylistWindow::parseColors() {
-    const QString txt = m_skin.text(QStringLiteral("pledit.txt"));
+    const QString txt = m_skin->text(QStringLiteral("pledit.txt"));
     for (QString line : txt.split(QLatin1Char('\n'))) {
         line = line.trimmed();
         const int eq = line.indexOf(QLatin1Char('='));
@@ -49,29 +53,93 @@ void SkinnedPlaylistWindow::parseColors() {
 }
 
 bool SkinnedPlaylistWindow::loadSkin(const QString &path) {
-    if (!m_skin.load(path))
+    auto skin = std::make_shared<Skin>();
+    if (!skin->load(path))
         return false;
+    setSkin(std::move(skin));
+    return true;
+}
+
+void SkinnedPlaylistWindow::setSkin(std::shared_ptr<Skin> skin) {
+    m_skin = std::move(skin);
     parseColors();
     update();
-    return true;
 }
 
 void SkinnedPlaylistWindow::setRows(const QStringList &titles,
                                     const QStringList &durations) {
     m_titles = titles;
     m_durations = durations;
-    m_scroll = 0;
+    m_selected = -1;   // the old selection no longer maps to the new queue
+    clampScroll();
     update();
 }
 
 void SkinnedPlaylistWindow::setCurrentRow(int i) {
     m_current = i;
+    // Auto-scroll so the playing row stays on screen (Winamp follows playback).
+    const int vis = visibleRows();
+    if (i >= 0 && vis > 0) {
+        if (i < m_scroll)
+            m_scroll = i;
+        else if (i >= m_scroll + vis)
+            m_scroll = i - vis + 1;
+        clampScroll();
+    }
     update();
+}
+
+// The list area runs from kListTop to (height() - kFrameB); each row is kRowH.
+int SkinnedPlaylistWindow::visibleRows() const {
+    return std::max(0, (height() - kFrameB - kListTop) / kRowH);
+}
+
+int SkinnedPlaylistWindow::rowAt(const QPoint &pt) const {
+    const int listBottom = height() - kFrameB;
+    if (pt.y() < kListTop || pt.y() >= listBottom)
+        return -1;
+    const int idx = m_scroll + (pt.y() - kListTop) / kRowH;
+    return (idx >= 0 && idx < int(m_titles.size())) ? idx : -1;
+}
+
+void SkinnedPlaylistWindow::clampScroll() {
+    const int maxScroll = std::max(0, int(m_titles.size()) - visibleRows());
+    m_scroll = std::clamp(m_scroll, 0, maxScroll);
+}
+
+void SkinnedPlaylistWindow::mousePressEvent(QMouseEvent *e) {
+    if (e->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(e);
+        return;
+    }
+    const int idx = rowAt(e->pos());
+    if (idx >= 0) {
+        m_selected = idx;
+        update();
+        emit rowSelected(idx);
+    }
+}
+
+void SkinnedPlaylistWindow::mouseDoubleClickEvent(QMouseEvent *e) {
+    const int idx = rowAt(e->pos());
+    if (idx >= 0)
+        emit rowActivated(idx);
+}
+
+void SkinnedPlaylistWindow::wheelEvent(QWheelEvent *e) {
+    // One notch (120 units) scrolls three rows, matching Winamp's feel.
+    const int notches = e->angleDelta().y() / 120;
+    if (notches == 0)
+        return;
+    m_scroll -= notches * 3;
+    clampScroll();
+    update();
+    e->accept();
 }
 
 void SkinnedPlaylistWindow::blitTitlebar(QPainter &p, int w) {
     auto S = [&](const coords::Rect &r) {
-        return m_skin.sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
+        return m_skin->sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
     };
     for (int x = kTitleLeft.w; x < w - kTitleRight.w; x += kTitleFill.w)
         p.drawImage(x, 0, S(kTitleFill));
@@ -82,7 +150,7 @@ void SkinnedPlaylistWindow::blitTitlebar(QPainter &p, int w) {
 
 void SkinnedPlaylistWindow::blitFrame(QPainter &p, int w, int lh) {
     auto S = [&](const coords::Rect &r) {
-        return m_skin.sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
+        return m_skin->sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
     };
     for (int y = kTitleH; y < lh - kFrameB; y += kEdgeTileH) {
         p.drawImage(0, y, S(kEdgeLeft));
@@ -104,12 +172,11 @@ void SkinnedPlaylistWindow::drawRows(QPainter &p, int w, int lh) {
     int y = kListTop;
     for (int i = m_scroll; i < m_titles.size() && y + kRowH <= listBottom; ++i) {
         const QRect row(kFrameL, y, rowW, kRowH);
-        if (i == m_current) {
+        // Selection is a background highlight; the playing row uses the "current"
+        // text colour (Winamp draws these two states independently).
+        if (i == m_selected)
             p.fillRect(row, m_cSelBg);
-            p.setPen(m_cCurrent);
-        } else {
-            p.setPen(m_cNormal);
-        }
+        p.setPen(i == m_current ? m_cCurrent : m_cNormal);
         const QRect text = row.adjusted(2, 0, -2, 0);
         p.drawText(text, Qt::AlignVCenter | Qt::AlignLeft,
                    QStringLiteral("%1. %2").arg(i + 1).arg(m_titles[i]));
@@ -121,7 +188,7 @@ void SkinnedPlaylistWindow::drawRows(QPainter &p, int w, int lh) {
 
 void SkinnedPlaylistWindow::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    if (!m_skin.isValid()) {
+    if (!m_skin || !m_skin->isValid()) {
         p.fillRect(rect(), Qt::black);
         return;
     }
