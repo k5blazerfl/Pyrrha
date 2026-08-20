@@ -161,6 +161,8 @@ void SkinnedWindow::mousePressEvent(QMouseEvent *e) {
     if (kMinimizeBtn.contains(pt.x(), pt.y())) { emit minimizeClicked(); return; }
     if (kShadeBtn.contains(pt.x(), pt.y())) { emit shadeClicked(); return; }
     if (kCloseBtn.contains(pt.x(), pt.y())) { emit closeClicked(); return; }
+    if (kEqToggle.contains(pt.x(), pt.y())) { emit eqToggleClicked(); return; }
+    if (kPlToggle.contains(pt.x(), pt.y())) { emit plToggleClicked(); return; }
 
     const int btn = transportButtonAt(pt);
     if (btn >= 0) {

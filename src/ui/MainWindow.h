@@ -17,7 +17,7 @@ class Player;
 class PlayerEngine;
 class MetadataScanner;
 class MprisAdapter;
-class SkinnedWindow;
+class SkinnedShell;
 
 // The prototype main window: a playlist plus a transport bar (prev / play-pause /
 // next / stop, a seek slider with time labels, and a volume slider). Enough to
@@ -48,7 +48,7 @@ private:
     Player *m_player;          // parented to this window
     MetadataScanner *m_scanner;  // parented to this window
     MprisAdapter *m_mpris;       // desktop media integration (parented to window)
-    SkinnedWindow *m_classic = nullptr;  // classic skin UI, created on demand
+    SkinnedShell *m_shell = nullptr;  // classic skin UI (main+EQ+playlist), on demand
 
     QListWidget *m_playlist = nullptr;
     QPushButton *m_playPause = nullptr;

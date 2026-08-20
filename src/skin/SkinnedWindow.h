@@ -48,6 +48,8 @@ signals:
     void minimizeClicked();
     void shadeClicked();
     void closeClicked();
+    void eqToggleClicked();   // show/hide the equalizer window
+    void plToggleClicked();   // show/hide the playlist window
     // Sliders (user-driven).
     void seekRequested(qreal fraction);   // 0..1 of the track
     void volumeChanged(qreal v);          // 0..1

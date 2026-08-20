@@ -27,6 +27,8 @@ public:
 
     void setRows(const QStringList &titles, const QStringList &durations);
     void setCurrentRow(int i);
+    int rowCount() const { return int(m_titles.size()); }
+    int currentRow() const { return m_current; }
 
     QSize sizeHint() const override {
         return {coords::pl::kDefaultW, coords::pl::kDefaultH};
