@@ -7,6 +7,7 @@
 
 #include <QApplication>
 #include <QFileInfo>
+#include <QSignalSpy>
 #include <QTest>
 #include <QUrl>
 #include <QVector>
@@ -69,6 +70,20 @@ int main(int argc, char **argv) {
     const int rowY = coords::pl::kListTop + 2 * coords::pl::kRowH + 3;
     QTest::mouseDClick(shell.playlistWindow(), Qt::LeftButton, {}, QPoint(40, rowY));
     CHECK(player.currentIndex() == 2);
+
+    // Single-clicking a row selects it (distinct from the playing row).
+    const int selY = coords::pl::kListTop + 1 * coords::pl::kRowH + 3;
+    QTest::mouseClick(shell.playlistWindow(), Qt::LeftButton, {}, QPoint(40, selY));
+    CHECK(shell.playlistWindow()->selectedRow() == 1);
+
+    // Dragging the preamp slider to the top emits a boost.
+    const QPoint preampTop(coords::eq::sliderX(0) + 2, coords::eq::kSliderTop + 2);
+    QSignalSpy preampSpy(shell.eqWindow(), &SkinnedEqWindow::preampChanged);
+    QTest::mousePress(shell.eqWindow(), Qt::LeftButton, {}, preampTop);
+    QTest::mouseRelease(shell.eqWindow(), Qt::LeftButton, {}, preampTop);
+    CHECK(preampSpy.count() >= 1);
+    if (!preampSpy.isEmpty())
+        CHECK(preampSpy.last().at(0).toReal() > 0.5);   // top of the slider = boost
 
     // The EQ toggle on the main window hides / shows the EQ window.
     QTest::mouseClick(shell.mainWindow(), Qt::LeftButton, {}, centre(coords::kEqToggle));

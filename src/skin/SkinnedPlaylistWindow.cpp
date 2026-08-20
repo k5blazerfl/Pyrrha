@@ -70,6 +70,7 @@ void SkinnedPlaylistWindow::setRows(const QStringList &titles,
                                     const QStringList &durations) {
     m_titles = titles;
     m_durations = durations;
+    m_selected = -1;   // the old selection no longer maps to the new queue
     clampScroll();
     update();
 }
@@ -104,6 +105,19 @@ int SkinnedPlaylistWindow::rowAt(const QPoint &pt) const {
 void SkinnedPlaylistWindow::clampScroll() {
     const int maxScroll = std::max(0, int(m_titles.size()) - visibleRows());
     m_scroll = std::clamp(m_scroll, 0, maxScroll);
+}
+
+void SkinnedPlaylistWindow::mousePressEvent(QMouseEvent *e) {
+    if (e->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(e);
+        return;
+    }
+    const int idx = rowAt(e->pos());
+    if (idx >= 0) {
+        m_selected = idx;
+        update();
+        emit rowSelected(idx);
+    }
 }
 
 void SkinnedPlaylistWindow::mouseDoubleClickEvent(QMouseEvent *e) {
@@ -158,12 +172,11 @@ void SkinnedPlaylistWindow::drawRows(QPainter &p, int w, int lh) {
     int y = kListTop;
     for (int i = m_scroll; i < m_titles.size() && y + kRowH <= listBottom; ++i) {
         const QRect row(kFrameL, y, rowW, kRowH);
-        if (i == m_current) {
+        // Selection is a background highlight; the playing row uses the "current"
+        // text colour (Winamp draws these two states independently).
+        if (i == m_selected)
             p.fillRect(row, m_cSelBg);
-            p.setPen(m_cCurrent);
-        } else {
-            p.setPen(m_cNormal);
-        }
+        p.setPen(i == m_current ? m_cCurrent : m_cNormal);
         const QRect text = row.adjusted(2, 0, -2, 0);
         p.drawText(text, Qt::AlignVCenter | Qt::AlignLeft,
                    QStringLiteral("%1. %2").arg(i + 1).arg(m_titles[i]));

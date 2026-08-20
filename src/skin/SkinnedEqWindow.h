@@ -40,8 +40,15 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent *) override;
+    void mousePressEvent(QMouseEvent *) override;
+    void mouseMoveEvent(QMouseEvent *) override;
+    void mouseReleaseEvent(QMouseEvent *) override;
 
 private:
+    int sliderAt(const QPoint &pt) const;         // 0=preamp, 1..10=band, -1 none
+    void applySliderDrag(int slider, int y);      // set gain from the thumb y
+
+    int m_dragSlider = -1;                        // slider being dragged, or -1
     std::shared_ptr<Skin> m_skin;
     qreal m_preamp = 0.0;
     std::array<qreal, coords::eq::kBands> m_bands{};  // zero-init = flat

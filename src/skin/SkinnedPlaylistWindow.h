@@ -37,12 +37,16 @@ public:
         return {coords::pl::kDefaultW, coords::pl::kDefaultH};
     }
 
+    int selectedRow() const { return m_selected; }
+
 signals:
     void closeClicked();
     void rowActivated(int index);   // a row was double-clicked (play it)
+    void rowSelected(int index);    // a row was single-clicked (highlight it)
 
 protected:
     void paintEvent(QPaintEvent *) override;
+    void mousePressEvent(QMouseEvent *) override;
     void mouseDoubleClickEvent(QMouseEvent *) override;
     void wheelEvent(QWheelEvent *) override;
 
@@ -59,7 +63,8 @@ private:
     std::shared_ptr<Skin> m_skin;
     QStringList m_titles;
     QStringList m_durations;
-    int m_current = -1;
+    int m_current = -1;    // the playing row (from the player)
+    int m_selected = -1;   // the user-selected row (single click)
     int m_scroll = 0;
 
     // pledit.txt colours (Winamp defaults: green on black).
