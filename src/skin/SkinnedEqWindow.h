@@ -8,6 +8,7 @@
 #pragma once
 
 #include <array>
+#include <memory>
 
 #include <QString>
 #include <QWidget>
@@ -23,7 +24,8 @@ public:
     explicit SkinnedEqWindow(QWidget *parent = nullptr);
 
     bool loadSkin(const QString &path);
-    bool hasSkin() const { return m_skin.isValid(); }
+    void setSkin(std::shared_ptr<Skin> skin);   // adopt an already-parsed Skin (shared)
+    bool hasSkin() const { return m_skin && m_skin->isValid(); }
 
     void setPreamp(qreal g);                 // -1..1 (0 = flat)
     void setBand(int i, qreal g);            // i in 0..9
@@ -40,7 +42,7 @@ protected:
     void paintEvent(QPaintEvent *) override;
 
 private:
-    Skin m_skin;
+    std::shared_ptr<Skin> m_skin;
     qreal m_preamp = 0.0;
     std::array<qreal, coords::eq::kBands> m_bands{};  // zero-init = flat
 };

@@ -15,17 +15,23 @@ SkinnedWindow::SkinnedWindow(QWidget *parent) : QWidget(parent) {
 }
 
 bool SkinnedWindow::loadSkin(const QString &path) {
-    if (!m_skin.load(path))
+    auto skin = std::make_shared<Skin>();
+    if (!skin->load(path))
         return false;
-    m_text.emplace(&m_skin);
-    m_num.emplace(&m_skin);
-    const QRegion shape = m_skin.region(QStringLiteral("normal"));
+    setSkin(std::move(skin));
+    return true;
+}
+
+void SkinnedWindow::setSkin(std::shared_ptr<Skin> skin) {
+    m_skin = std::move(skin);
+    m_text.emplace(m_skin.get());
+    m_num.emplace(m_skin.get());
+    const QRegion shape = m_skin->region(QStringLiteral("normal"));
     if (!shape.isEmpty())
         setMask(shape);   // shaped skin
     else
         clearMask();
     update();
-    return true;
 }
 
 void SkinnedWindow::setTitle(const QString &title) {
@@ -55,15 +61,15 @@ void SkinnedWindow::setBalance(qreal b) {
 
 void SkinnedWindow::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    if (!m_skin.isValid()) {
+    if (!m_skin || !m_skin->isValid()) {
         p.fillRect(rect(), Qt::black);
         return;
     }
     using namespace coords;
 
-    p.drawImage(0, 0, m_skin.image(QStringLiteral("main.bmp")));
+    p.drawImage(0, 0, m_skin->image(QStringLiteral("main.bmp")));
     p.drawImage(0, 0,
-                m_skin.sprite(QStringLiteral("titlebar.bmp"), kTitlebarSrcX,
+                m_skin->sprite(QStringLiteral("titlebar.bmp"), kTitlebarSrcX,
                               kTitlebarActiveY, kTitlebarW, kTitlebarH));
 
     constexpr int nButtons = int(sizeof(kButtons) / sizeof(kButtons[0]));
@@ -71,26 +77,26 @@ void SkinnedWindow::paintEvent(QPaintEvent *) {
         const Button &b = kButtons[i];
         const int sy = (i == m_pressedButton) ? b.sy1 : b.sy0;  // pressed state
         p.drawImage(b.dx, b.dy,
-                    m_skin.sprite(QStringLiteral("cbuttons.bmp"), b.sx, sy, b.w,
+                    m_skin->sprite(QStringLiteral("cbuttons.bmp"), b.sx, sy, b.w,
                                   b.h));
     }
 
     p.drawImage(kStatusX, kStatusY,
-                m_skin.sprite(QStringLiteral("playpaus.bmp"), m_playing ? 0 : 9,
+                m_skin->sprite(QStringLiteral("playpaus.bmp"), m_playing ? 0 : 9,
                               0, 9, 9));
 
     const int vlevel = qRound(m_volume * 27);
     p.drawImage(kVolumeX, kVolumeY,
-                m_skin.sprite(QStringLiteral("volume.bmp"), 0, vlevel * 15,
+                m_skin->sprite(QStringLiteral("volume.bmp"), 0, vlevel * 15,
                               kVolumeW, kVolumeH));
 
     const int blevel = qRound(qAbs(m_balance) * 27);
     p.drawImage(kBalanceX, kBalanceY,
-                m_skin.sprite(QStringLiteral("balance.bmp"), kBalanceSrcX,
+                m_skin->sprite(QStringLiteral("balance.bmp"), kBalanceSrcX,
                               blevel * 15, kBalanceW, kBalanceH));
 
     p.drawImage(kPosbarX, kPosbarY,
-                m_skin.sprite(QStringLiteral("posbar.bmp"), 0, 0, kPosbarW,
+                m_skin->sprite(QStringLiteral("posbar.bmp"), 0, 0, kPosbarW,
                               kPosbarH));
 
     if (m_text)

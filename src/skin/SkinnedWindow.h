@@ -7,6 +7,7 @@
 // drag, windowshade, the visualizer) grows on top of this.
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include <QString>
@@ -23,8 +24,9 @@ class SkinnedWindow : public QWidget {
 public:
     explicit SkinnedWindow(QWidget *parent = nullptr);
 
-    bool loadSkin(const QString &path);   // .wsz or unpacked dir
-    bool hasSkin() const { return m_skin.isValid(); }
+    bool loadSkin(const QString &path);         // parse a .wsz / dir into a new Skin
+    void setSkin(std::shared_ptr<Skin> skin);   // adopt an already-parsed Skin (shared)
+    bool hasSkin() const { return m_skin && m_skin->isValid(); }
 
     void setTitle(const QString &title);
     void setTimeMs(qint64 ms);
@@ -71,7 +73,7 @@ private:
     Drag m_drag = Drag::None;
     int m_pressedButton = -1;   // transport button held down, or -1
 
-    Skin m_skin;
+    std::shared_ptr<Skin> m_skin;
     std::optional<TextFont> m_text;
     std::optional<NumberFont> m_num;
 

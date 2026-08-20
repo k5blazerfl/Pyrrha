@@ -13,15 +13,21 @@ SkinnedEqWindow::SkinnedEqWindow(QWidget *parent) : QWidget(parent) {
 }
 
 bool SkinnedEqWindow::loadSkin(const QString &path) {
-    if (!m_skin.load(path))
+    auto skin = std::make_shared<Skin>();
+    if (!skin->load(path))
         return false;
-    const QRegion shape = m_skin.region(QStringLiteral("equalizer"));
+    setSkin(std::move(skin));
+    return true;
+}
+
+void SkinnedEqWindow::setSkin(std::shared_ptr<Skin> skin) {
+    m_skin = std::move(skin);
+    const QRegion shape = m_skin->region(QStringLiteral("equalizer"));
     if (!shape.isEmpty())
         setMask(shape);
     else
         clearMask();
     update();
-    return true;
 }
 
 void SkinnedEqWindow::setPreamp(qreal g) {
@@ -44,7 +50,7 @@ void SkinnedEqWindow::setBands(const std::array<qreal, coords::eq::kBands> &g) {
 
 void SkinnedEqWindow::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    if (!m_skin.isValid()) {
+    if (!m_skin || !m_skin->isValid()) {
         p.fillRect(rect(), Qt::black);
         return;
     }
@@ -52,10 +58,10 @@ void SkinnedEqWindow::paintEvent(QPaintEvent *) {
 
     // The EQ face (titlebar, graph area, slider grooves, ON/AUTO/Presets) is the
     // top of eqmain.bmp.
-    p.drawImage(0, 0, m_skin.sprite(QStringLiteral("eqmain.bmp"), 0, 0, kW, kH));
+    p.drawImage(0, 0, m_skin->sprite(QStringLiteral("eqmain.bmp"), 0, 0, kW, kH));
 
     const QImage thumb =
-        m_skin.sprite(QStringLiteral("eqmain.bmp"), kThumbSrcX, kThumbSrcY,
+        m_skin->sprite(QStringLiteral("eqmain.bmp"), kThumbSrcX, kThumbSrcY,
                       kThumbW, kThumbH);
     p.drawImage(sliderX(0), thumbY(m_preamp), thumb);           // preamp
     for (int i = 0; i < kBands; ++i)

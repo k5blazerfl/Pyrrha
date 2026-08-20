@@ -31,7 +31,7 @@ SkinnedPlaylistWindow::SkinnedPlaylistWindow(QWidget *parent) : QWidget(parent) 
 }
 
 void SkinnedPlaylistWindow::parseColors() {
-    const QString txt = m_skin.text(QStringLiteral("pledit.txt"));
+    const QString txt = m_skin->text(QStringLiteral("pledit.txt"));
     for (QString line : txt.split(QLatin1Char('\n'))) {
         line = line.trimmed();
         const int eq = line.indexOf(QLatin1Char('='));
@@ -53,11 +53,17 @@ void SkinnedPlaylistWindow::parseColors() {
 }
 
 bool SkinnedPlaylistWindow::loadSkin(const QString &path) {
-    if (!m_skin.load(path))
+    auto skin = std::make_shared<Skin>();
+    if (!skin->load(path))
         return false;
+    setSkin(std::move(skin));
+    return true;
+}
+
+void SkinnedPlaylistWindow::setSkin(std::shared_ptr<Skin> skin) {
+    m_skin = std::move(skin);
     parseColors();
     update();
-    return true;
 }
 
 void SkinnedPlaylistWindow::setRows(const QStringList &titles,
@@ -119,7 +125,7 @@ void SkinnedPlaylistWindow::wheelEvent(QWheelEvent *e) {
 
 void SkinnedPlaylistWindow::blitTitlebar(QPainter &p, int w) {
     auto S = [&](const coords::Rect &r) {
-        return m_skin.sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
+        return m_skin->sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
     };
     for (int x = kTitleLeft.w; x < w - kTitleRight.w; x += kTitleFill.w)
         p.drawImage(x, 0, S(kTitleFill));
@@ -130,7 +136,7 @@ void SkinnedPlaylistWindow::blitTitlebar(QPainter &p, int w) {
 
 void SkinnedPlaylistWindow::blitFrame(QPainter &p, int w, int lh) {
     auto S = [&](const coords::Rect &r) {
-        return m_skin.sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
+        return m_skin->sprite(QStringLiteral("pledit.bmp"), r.x, r.y, r.w, r.h);
     };
     for (int y = kTitleH; y < lh - kFrameB; y += kEdgeTileH) {
         p.drawImage(0, y, S(kEdgeLeft));
@@ -169,7 +175,7 @@ void SkinnedPlaylistWindow::drawRows(QPainter &p, int w, int lh) {
 
 void SkinnedPlaylistWindow::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    if (!m_skin.isValid()) {
+    if (!m_skin || !m_skin->isValid()) {
         p.fillRect(rect(), Qt::black);
         return;
     }

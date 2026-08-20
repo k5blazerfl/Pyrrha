@@ -2,8 +2,11 @@
 // Copyright (C) 2026 the Pyrrha authors
 #include "ui/SkinnedShell.h"
 
+#include <memory>
+
 #include "model/Track.h"
 #include "player/Player.h"
+#include "skin/Skin.h"
 #include "skin/SkinCoords.h"
 #include "skin/SkinnedEqWindow.h"
 #include "skin/SkinnedPlaylistWindow.h"
@@ -47,12 +50,16 @@ SkinnedShell::~SkinnedShell() {
 }
 
 bool SkinnedShell::loadSkin(const QString &path) {
-    const bool ok = m_main->loadSkin(path);
-    // TODO: share one Skin across the three windows instead of parsing thrice.
-    m_eq->loadSkin(path);
-    m_pl->loadSkin(path);
+    // Parse the .wsz once and share the single decoded Skin (and its sprite
+    // cache) across all three windows, rather than each window re-parsing it.
+    auto skin = std::make_shared<Skin>();
+    if (!skin->load(path))
+        return false;
+    m_main->setSkin(skin);
+    m_eq->setSkin(skin);
+    m_pl->setSkin(skin);
     positionWindows();
-    return ok;
+    return true;
 }
 
 void SkinnedShell::positionWindows() {

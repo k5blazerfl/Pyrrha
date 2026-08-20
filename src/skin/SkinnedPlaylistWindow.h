@@ -8,6 +8,8 @@
 // drag-reorder and the miniplayer clock grow on top.
 #pragma once
 
+#include <memory>
+
 #include <QColor>
 #include <QStringList>
 #include <QWidget>
@@ -23,7 +25,8 @@ public:
     explicit SkinnedPlaylistWindow(QWidget *parent = nullptr);
 
     bool loadSkin(const QString &path);
-    bool hasSkin() const { return m_skin.isValid(); }
+    void setSkin(std::shared_ptr<Skin> skin);   // adopt an already-parsed Skin (shared)
+    bool hasSkin() const { return m_skin && m_skin->isValid(); }
 
     void setRows(const QStringList &titles, const QStringList &durations);
     void setCurrentRow(int i);
@@ -53,7 +56,7 @@ private:
     int visibleRows() const;             // rows that fit in the list area
     void clampScroll();                  // keep m_scroll in range
 
-    Skin m_skin;
+    std::shared_ptr<Skin> m_skin;
     QStringList m_titles;
     QStringList m_durations;
     int m_current = -1;
