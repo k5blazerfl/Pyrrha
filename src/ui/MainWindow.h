@@ -17,6 +17,7 @@ class Player;
 class PlayerEngine;
 class MetadataScanner;
 class MprisAdapter;
+class SkinnedWindow;
 
 // The prototype main window: a playlist plus a transport bar (prev / play-pause /
 // next / stop, a seek slider with time labels, and a volume slider). Enough to
@@ -32,6 +33,7 @@ private slots:
     void openFolder();
     void reloadQueue();
     void onTrackUpdated(int index, const Track &track);
+    void openClassicSkin();   // open a Winamp-skinned window wired to the player
 
 private:
     void buildUi();
@@ -46,6 +48,7 @@ private:
     Player *m_player;          // parented to this window
     MetadataScanner *m_scanner;  // parented to this window
     MprisAdapter *m_mpris;       // desktop media integration (parented to window)
+    SkinnedWindow *m_classic = nullptr;  // classic skin UI, created on demand
 
     QListWidget *m_playlist = nullptr;
     QPushButton *m_playPause = nullptr;
