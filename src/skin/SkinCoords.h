@@ -126,4 +126,29 @@ inline constexpr int thumbY(double g) {
 }
 }  // namespace eq
 
+// -- playlist window (pledit.bmp / pledit.txt; resizable) -------------------
+namespace pl {
+inline constexpr int kTitleH = 20;
+inline constexpr int kRowH = 12;
+inline constexpr int kListTop = kTitleH + 2;
+inline constexpr int kGrip = 14;
+inline constexpr int kFrameL = 12;   // left inset
+inline constexpr int kFrameR = 19;   // right inset
+inline constexpr int kFrameB = 38;   // bottom inset (holds the miniplayer)
+inline constexpr int kDefaultW = 275;
+inline constexpr int kDefaultH = 232;
+inline constexpr int kEdgeTileH = 29;  // left/right edge tile height
+
+// pledit.bmp source rects {x,y,w,h}:
+inline constexpr Rect kTitleLeft{0, 0, 25, kTitleH};
+inline constexpr Rect kTitleRight{153, 0, 25, kTitleH};
+inline constexpr Rect kTitleFill{127, 0, 25, kTitleH};
+inline constexpr Rect kTitleCentre{26, 0, 100, kTitleH};
+inline constexpr Rect kEdgeLeft{0, 42, kFrameL, kEdgeTileH};
+inline constexpr Rect kEdgeRight{32, 42, kFrameR, kEdgeTileH};
+inline constexpr Rect kBottomLeft{0, 72, 125, kFrameB};
+inline constexpr Rect kBottomFill{150, 72, 25, kFrameB};
+inline constexpr Rect kBottomRight{126, 72, 150, kFrameB};
+}  // namespace pl
+
 }  // namespace pyrrha::coords

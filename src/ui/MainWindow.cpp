@@ -18,6 +18,8 @@
 #include "mpris/MprisAdapter.h"
 #include "player/Player.h"
 #include "sources/MetadataScanner.h"
+#include "skin/SkinnedWindow.h"
+#include "ui/ClassicController.h"
 
 namespace pyrrha {
 
@@ -62,6 +64,9 @@ void MainWindow::buildUi() {
                     &MainWindow::openFiles);
     file->addAction(QStringLiteral("Open F&older…"), this,
                     &MainWindow::openFolder);
+    file->addSeparator();
+    file->addAction(QStringLiteral("&Classic Skin…"), this,
+                    &MainWindow::openClassicSkin);
     file->addSeparator();
     file->addAction(QStringLiteral("&Quit"), QKeySequence::Quit, this,
                     &QWidget::close);
@@ -204,6 +209,22 @@ void MainWindow::onTrackUpdated(int index, const Track &track) {
     m_player->updateTrack(index, track);  // refreshes now-playing if it's current
     if (index >= 0 && index < m_playlist->count())
         m_playlist->item(index)->setText(rowLabel(track));
+}
+
+void MainWindow::openClassicSkin() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Open a Winamp 2.x skin"), {},
+        QStringLiteral("Winamp skins (*.wsz *.zip);;All files (*)"));
+    if (path.isEmpty())
+        return;
+    if (!m_classic) {
+        m_classic = new SkinnedWindow();  // a top-level classic window
+        new ClassicController(m_classic, m_player, m_classic);
+    }
+    if (m_classic->loadSkin(path)) {
+        m_classic->show();
+        m_classic->raise();
+    }
 }
 
 QString MainWindow::rowLabel(const Track &t) {
