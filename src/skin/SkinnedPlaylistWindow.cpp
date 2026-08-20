@@ -3,8 +3,12 @@
 #include "skin/SkinnedPlaylistWindow.h"
 
 #include <QFont>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QWheelEvent>
+
+#include <algorithm>
 
 namespace pyrrha {
 
@@ -60,13 +64,57 @@ void SkinnedPlaylistWindow::setRows(const QStringList &titles,
                                     const QStringList &durations) {
     m_titles = titles;
     m_durations = durations;
-    m_scroll = 0;
+    clampScroll();
     update();
 }
 
 void SkinnedPlaylistWindow::setCurrentRow(int i) {
     m_current = i;
+    // Auto-scroll so the playing row stays on screen (Winamp follows playback).
+    const int vis = visibleRows();
+    if (i >= 0 && vis > 0) {
+        if (i < m_scroll)
+            m_scroll = i;
+        else if (i >= m_scroll + vis)
+            m_scroll = i - vis + 1;
+        clampScroll();
+    }
     update();
+}
+
+// The list area runs from kListTop to (height() - kFrameB); each row is kRowH.
+int SkinnedPlaylistWindow::visibleRows() const {
+    return std::max(0, (height() - kFrameB - kListTop) / kRowH);
+}
+
+int SkinnedPlaylistWindow::rowAt(const QPoint &pt) const {
+    const int listBottom = height() - kFrameB;
+    if (pt.y() < kListTop || pt.y() >= listBottom)
+        return -1;
+    const int idx = m_scroll + (pt.y() - kListTop) / kRowH;
+    return (idx >= 0 && idx < int(m_titles.size())) ? idx : -1;
+}
+
+void SkinnedPlaylistWindow::clampScroll() {
+    const int maxScroll = std::max(0, int(m_titles.size()) - visibleRows());
+    m_scroll = std::clamp(m_scroll, 0, maxScroll);
+}
+
+void SkinnedPlaylistWindow::mouseDoubleClickEvent(QMouseEvent *e) {
+    const int idx = rowAt(e->pos());
+    if (idx >= 0)
+        emit rowActivated(idx);
+}
+
+void SkinnedPlaylistWindow::wheelEvent(QWheelEvent *e) {
+    // One notch (120 units) scrolls three rows, matching Winamp's feel.
+    const int notches = e->angleDelta().y() / 120;
+    if (notches == 0)
+        return;
+    m_scroll -= notches * 3;
+    clampScroll();
+    update();
+    e->accept();
 }
 
 void SkinnedPlaylistWindow::blitTitlebar(QPainter &p, int w) {

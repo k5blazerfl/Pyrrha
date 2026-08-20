@@ -30,6 +30,10 @@ SkinnedShell::SkinnedShell(Player *player, QObject *parent)
     connect(m_eq, &SkinnedEqWindow::closeClicked, m_eq, &QWidget::hide);
     connect(m_pl, &SkinnedPlaylistWindow::closeClicked, m_pl, &QWidget::hide);
 
+    // Double-clicking a playlist row plays it.
+    connect(m_pl, &SkinnedPlaylistWindow::rowActivated, this,
+            [this](int i) { m_player->playIndex(i); });
+
     // The playlist mirrors the queue.
     connect(player, &Player::queueChanged, this, [this] { refreshPlaylist(); });
     connect(player, &Player::currentChanged, this, [this] { refreshPlaylist(); });

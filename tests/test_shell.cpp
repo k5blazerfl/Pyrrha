@@ -65,6 +65,11 @@ int main(int argc, char **argv) {
     CHECK(shell.eqWindow()->isVisible());
     CHECK(shell.playlistWindow()->isVisible());
 
+    // Double-clicking a playlist row plays that track (row 2 of 4).
+    const int rowY = coords::pl::kListTop + 2 * coords::pl::kRowH + 3;
+    QTest::mouseDClick(shell.playlistWindow(), Qt::LeftButton, {}, QPoint(40, rowY));
+    CHECK(player.currentIndex() == 2);
+
     // The EQ toggle on the main window hides / shows the EQ window.
     QTest::mouseClick(shell.mainWindow(), Qt::LeftButton, {}, centre(coords::kEqToggle));
     CHECK(!shell.eqWindow()->isVisible());

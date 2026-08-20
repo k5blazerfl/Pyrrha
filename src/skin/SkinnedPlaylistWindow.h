@@ -36,15 +36,22 @@ public:
 
 signals:
     void closeClicked();
+    void rowActivated(int index);   // a row was double-clicked (play it)
 
 protected:
     void paintEvent(QPaintEvent *) override;
+    void mouseDoubleClickEvent(QMouseEvent *) override;
+    void wheelEvent(QWheelEvent *) override;
 
 private:
     void parseColors();
     void blitTitlebar(QPainter &p, int w);
     void blitFrame(QPainter &p, int w, int lh);
     void drawRows(QPainter &p, int w, int lh);
+
+    int rowAt(const QPoint &pt) const;   // queue index under pt, or -1
+    int visibleRows() const;             // rows that fit in the list area
+    void clampScroll();                  // keep m_scroll in range
 
     Skin m_skin;
     QStringList m_titles;
